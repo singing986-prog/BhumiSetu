@@ -2,9 +2,11 @@ import { useState, useEffect } from "react";
 import { KPI } from "../types";
 import { motion } from "motion/react";
 import { CheckCircle2, Circle, AlertCircle } from "lucide-react";
+import { useTranslation } from "../i18n";
 
 export function KPILedger() {
   const [kpis, setKpis] = useState<KPI | null>(null);
+  const { t } = useTranslation();
 
   useEffect(() => {
     fetch("/api/kpis")
@@ -15,12 +17,12 @@ export function KPILedger() {
   if (!kpis) return <div className="h-24 animate-pulse bg-graticule-teal/10" />;
 
   const metrics = [
-    { label: "Area Notified", value: kpis.areaNotified },
-    { label: "Area Acquired", value: kpis.areaAcquired },
-    { label: "Comp. Assessed", value: kpis.compensationAssessed },
-    { label: "Comp. Paid", value: kpis.compensationDisbursed },
-    { label: "Families Affected", value: kpis.familiesAffected },
-    { label: "R&R Settled", value: kpis.familiesRnR },
+    { label: t("dashboard.kpi.areaNotified"), value: kpis.areaNotified },
+    { label: t("dashboard.kpi.areaAcquired"), value: kpis.areaAcquired },
+    { label: t("dashboard.kpi.compAssessed"), value: kpis.compensationAssessed },
+    { label: t("dashboard.kpi.compPaid"), value: kpis.compensationDisbursed },
+    { label: t("dashboard.kpi.familiesAffected"), value: kpis.familiesAffected },
+    { label: t("dashboard.kpi.rnrSettled"), value: kpis.familiesRnR },
   ];
 
   return (
@@ -48,12 +50,13 @@ export function KPILedger() {
 }
 
 export function PredictiveRisk() {
+  const { t } = useTranslation();
   return (
     <div className="bg-white p-6 border border-graticule-teal/30 h-full flex flex-col mt-6 shadow-sm">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h3 className="font-serif text-lg font-semibold text-registry-ink">Predictive Delay Risk</h3>
-          <p className="text-sm text-registry-ink/60">AI model forecast based on district history & objection volume</p>
+          <h3 className="font-serif text-lg font-semibold text-registry-ink">{t("dashboard.riskTitle")}</h3>
+          <p className="text-sm text-registry-ink/60">{t("risk.desc")}</p>
         </div>
       </div>
       
@@ -63,8 +66,8 @@ export function PredictiveRisk() {
             <span className="text-alluvium-red font-bold font-serif text-xl">1</span>
           </div>
           <div>
-            <h4 className="font-medium text-registry-ink">High Risk Project</h4>
-            <p className="text-xs text-registry-ink/60 mt-1">Western Dedicated Freight Corridor Phase 3</p>
+            <h4 className="font-medium text-registry-ink">{t("risk.high")}</h4>
+            <p className="text-xs text-registry-ink/60 mt-1">{t("risk.project1", "Western Dedicated Freight Corridor Phase 3")}</p>
           </div>
         </div>
         
@@ -73,8 +76,8 @@ export function PredictiveRisk() {
             <span className="text-tilled-earth font-bold font-serif text-xl">1</span>
           </div>
           <div>
-            <h4 className="font-medium text-registry-ink">Medium Risk Project</h4>
-            <p className="text-xs text-registry-ink/60 mt-1">Godavari Irrigation Canal Ext.</p>
+            <h4 className="font-medium text-registry-ink">{t("risk.medium")}</h4>
+            <p className="text-xs text-registry-ink/60 mt-1">{t("risk.project2", "Godavari Irrigation Canal Ext.")}</p>
           </div>
         </div>
 
@@ -83,8 +86,8 @@ export function PredictiveRisk() {
             <span className="text-cultivated-green font-bold font-serif text-xl">1</span>
           </div>
           <div>
-            <h4 className="font-medium text-registry-ink">Low Risk Project</h4>
-            <p className="text-xs text-registry-ink/60 mt-1">Delhi-Dehradun Expressway</p>
+            <h4 className="font-medium text-registry-ink">{t("risk.low")}</h4>
+            <p className="text-xs text-registry-ink/60 mt-1">{t("risk.project3", "Delhi-Dehradun Expressway")}</p>
           </div>
         </div>
       </div>
@@ -92,25 +95,26 @@ export function PredictiveRisk() {
   );
 }
 export function WorkflowTracker() {
+  const { t } = useTranslation();
   const stages = [
-    { id: 1, name: "Notification", status: "completed", date: "12 Oct 2025" },
-    { id: 2, name: "Declaration", status: "completed", date: "05 Nov 2025" },
-    { id: 3, name: "Award", status: "current", date: "Pending (Due: 10 Dec)" },
-    { id: 4, name: "Compensation", status: "pending", date: "-" },
-    { id: 5, name: "Possession", status: "pending", date: "-" },
-    { id: 6, name: "R&R", status: "pending", date: "-" },
+    { id: 1, name: t("workflow.notification"), status: "completed", date: "12 Oct 2025" },
+    { id: 2, name: t("workflow.declaration"), status: "completed", date: "05 Nov 2025" },
+    { id: 3, name: t("workflow.award"), status: "current", date: "Pending (Due: 10 Dec)" },
+    { id: 4, name: t("workflow.compensation"), status: "pending", date: "-" },
+    { id: 5, name: t("workflow.possession"), status: "pending", date: "-" },
+    { id: 6, name: t("workflow.rnr"), status: "pending", date: "-" },
   ];
 
   return (
     <div className="bg-white p-6 border border-graticule-teal/30 h-full flex flex-col">
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h3 className="font-serif text-lg font-semibold text-registry-ink">Acquisition Lifecycle</h3>
-          <p className="text-sm text-registry-ink/60">RFCTLARR Act, 2013 Track</p>
+          <h3 className="font-serif text-lg font-semibold text-registry-ink">{t("dashboard.trackerTitle")}</h3>
+          <p className="text-sm text-registry-ink/60">{t("workflow.actLabel")}</p>
         </div>
         <div className="px-3 py-1 bg-alluvium-red/10 text-alluvium-red border border-alluvium-red/30 text-xs font-medium rounded-sm flex items-center gap-1.5">
           <AlertCircle className="w-3.5 h-3.5" />
-          Sec 24(2) Lapse Risk
+          {t("workflow.lapseRisk")}
         </div>
       </div>
 

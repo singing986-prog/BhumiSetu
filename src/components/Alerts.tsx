@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { Alert } from "../types";
-import { Bell, AlertTriangle, Info, Clock, ShieldAlert } from "lucide-react";
+import { Bell, AlertTriangle, Info, Clock, ShieldAlert, X } from "lucide-react";
 import { motion } from "motion/react";
 
-export function AlertsPanel() {
+export function AlertsPanel({ setActiveTab }: { setActiveTab: (tab: string) => void }) {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -15,6 +15,11 @@ export function AlertsPanel() {
         setIsLoading(false);
       });
   }, []);
+
+  const dismissAlert = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setAlerts(alerts.filter(alert => alert.id !== id));
+  };
 
   const getSeverityStyles = (severity: string) => {
     switch (severity) {
@@ -60,7 +65,8 @@ export function AlertsPanel() {
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: i * 0.05 }}
                 key={alert.id}
-                className={`p-5 flex gap-4 hover:bg-graticule-teal/5 transition-colors cursor-pointer ${!alert.isRead ? 'bg-graticule-teal/5' : ''}`}
+                onClick={() => setActiveTab('proposals')}
+                className={`p-5 flex gap-4 hover:bg-graticule-teal/5 transition-colors cursor-pointer group ${!alert.isRead ? 'bg-graticule-teal/5' : ''}`}
               >
                 <div className="mt-1 shrink-0">
                   {getAlertIcon(alert.type, alert.severity)}
@@ -78,11 +84,18 @@ export function AlertsPanel() {
                   <h4 className="font-semibold text-registry-ink text-base mb-1">{alert.type}: {alert.projectName}</h4>
                   <p className="text-registry-ink/80 text-sm leading-relaxed">{alert.message}</p>
                 </div>
-                {!alert.isRead && (
-                  <div className="shrink-0 flex items-center">
+                <div className="shrink-0 flex items-center gap-3">
+                  {!alert.isRead && (
                     <div className="w-2.5 h-2.5 bg-alluvium-red rounded-full"></div>
-                  </div>
-                )}
+                  )}
+                  <button 
+                    onClick={(e) => dismissAlert(e, alert.id)}
+                    className="p-1.5 text-registry-ink/40 hover:text-alluvium-red hover:bg-alluvium-red/10 rounded-sm transition-colors opacity-0 group-hover:opacity-100"
+                    title="Dismiss notification"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </motion.div>
             ))}
           </div>

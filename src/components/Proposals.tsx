@@ -2,8 +2,10 @@ import { useState, useEffect } from "react";
 import { Proposal } from "../types";
 import { Plus, ArrowLeft, Clock, CheckCircle2, AlertCircle, FileText } from "lucide-react";
 import { motion } from "motion/react";
+import { useTranslation } from "../i18n";
 
 export function Proposals() {
+  const { t } = useTranslation();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [view, setView] = useState<"list" | "create">("list");
   const [isLoading, setIsLoading] = useState(true);
@@ -171,14 +173,14 @@ export function Proposals() {
     <div className="p-8 w-full">
       <div className="flex justify-between items-end mb-8">
         <div>
-          <h2 className="text-3xl font-serif font-semibold text-registry-ink">Project Proposals</h2>
-          <p className="text-registry-ink/60 mt-1">Track and manage land acquisition proposals across all ministries.</p>
+          <h2 className="text-3xl font-serif font-semibold text-registry-ink">{t("proposals.title")}</h2>
+          <p className="text-registry-ink/60 mt-1">{t("proposals.desc")}</p>
         </div>
         <button 
           onClick={() => setView("create")}
           className="flex items-center gap-2 px-4 py-2 bg-registry-ink text-white font-medium hover:bg-registry-ink/90 transition-colors shadow-sm"
         >
-          <Plus className="w-4 h-4" /> New Proposal
+          <Plus className="w-4 h-4" /> {t("proposals.new")}
         </button>
       </div>
 
@@ -187,13 +189,13 @@ export function Proposals() {
           <table className="w-full text-left text-sm whitespace-nowrap">
             <thead>
               <tr className="bg-graticule-teal/10 border-b border-graticule-teal/30 text-registry-ink font-semibold">
-                <th className="px-6 py-4 font-mono uppercase tracking-wider text-xs">Reference ID</th>
-                <th className="px-6 py-4">Project Name</th>
-                <th className="px-6 py-4">Ministry</th>
-                <th className="px-6 py-4">Location</th>
-                <th className="px-6 py-4">Area (Ha)</th>
-                <th className="px-6 py-4">Delay Risk</th>
-                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4 font-mono uppercase tracking-wider text-xs">{t("proposals.table.id")}</th>
+                <th className="px-6 py-4">{t("proposals.table.name")}</th>
+                <th className="px-6 py-4">{t("proposals.table.ministry")}</th>
+                <th className="px-6 py-4">{t("proposals.table.location")}</th>
+                <th className="px-6 py-4">{t("proposals.table.area")}</th>
+                <th className="px-6 py-4">{t("proposals.table.risk")}</th>
+                <th className="px-6 py-4">{t("proposals.table.status")}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-graticule-teal/20">
@@ -254,7 +256,10 @@ export function Proposals() {
                           proposal.status === 'Rejected' ? 'text-alluvium-red' :
                           'text-registry-ink/70'
                         }`}>
-                          {proposal.status}
+                          {proposal.status === 'Approved' ? t("proposals.status.approved") :
+                           proposal.status === 'Under Scrutiny' ? t("proposals.status.underScrutiny") :
+                           proposal.status === 'Rejected' ? t("proposals.status.rejected") :
+                           proposal.status}
                         </span>
                       </div>
                     </td>

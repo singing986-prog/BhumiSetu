@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import Map, { Source, Layer, NavigationControl, MapRef } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { ParcelProperties } from "../types";
+import { useTranslation } from "../i18n";
 
 const locationCoordinates: Record<string, { longitude: number, latitude: number, zoom: number }> = {
   "All States": { longitude: 78.9629, latitude: 20.5937, zoom: 4 },
@@ -39,7 +40,7 @@ const locationCoordinates: Record<string, { longitude: number, latitude: number,
   "All Districts": { longitude: 78.9629, latitude: 20.5937, zoom: 4 }
 };
 
-export function GISMap({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
+export function GISMap({ selectedState = "All States", selectedDistrict = "All Districts", isAutoSync = true }: { selectedState?: string, selectedDistrict?: string, isAutoSync?: boolean }) {
   const mapRef = useRef<MapRef>(null);
   const [parcels, setParcels] = useState<any>(null);
   const [hoverInfo, setHoverInfo] = useState<{
@@ -47,6 +48,11 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
     x: number;
     y: number;
   } | null>(null);
+  
+  const [showSec11, setShowSec11] = useState(true);
+  const [showAward, setShowAward] = useState(true);
+  const [showCorridor, setShowCorridor] = useState(true);
+  const { t } = useTranslation();
 
   useEffect(() => {
     fetch("/api/parcels")
@@ -56,6 +62,8 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
   }, []);
 
   useEffect(() => {
+    if (!isAutoSync) return;
+    
     let target = locationCoordinates[selectedDistrict];
     if (selectedDistrict === "All Districts" || !target) {
       target = locationCoordinates[selectedState];
@@ -68,7 +76,7 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
         duration: 2000
       });
     }
-  }, [selectedState, selectedDistrict]);
+  }, [selectedState, selectedDistrict, isAutoSync]);
 
   const onHover = (event: any) => {
     const {
@@ -112,7 +120,7 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
             }
           ]
         }}
-        interactiveLayerIds={parcels ? ["parcels-fill", "corridor-line"] : []}
+        interactiveLayerIds={parcels ? ["parcels-sec11-fill", "parcels-award-fill", "corridor-line"] : []}
         onMouseMove={onHover}
         onMouseLeave={() => setHoverInfo(null)}
         cursor={hoverInfo ? "pointer" : "grab"}
@@ -122,17 +130,11 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
         {parcels && (
           <Source id="parcels" type="geojson" data={parcels}>
             <Layer
-              id="parcels-fill"
+              id="parcels-sec11-fill"
               type="fill"
-              filter={['==', ['geometry-type'], 'Polygon']}
+              filter={['all', ['==', ['geometry-type'], 'Polygon'], ['==', ['get', 'status'], 'Notification']]}
               paint={{
-                "fill-color": [
-                  "match",
-                  ["get", "status"],
-                  "Notification", "#A8672E", // Tilled Earth
-                  "Award", "#2F6B3A", // Cultivated Green
-                  "#5E7B78" // Graticule Teal
-                ],
+                "fill-color": "#A8672E",
                 "fill-opacity": [
                   "case",
                   ["boolean", ["feature-state", "hover"], false],
@@ -140,6 +142,22 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
                   0.4
                 ]
               }}
+              layout={{ visibility: showSec11 ? 'visible' : 'none' }}
+            />
+            <Layer
+              id="parcels-award-fill"
+              type="fill"
+              filter={['all', ['==', ['geometry-type'], 'Polygon'], ['==', ['get', 'status'], 'Award']]}
+              paint={{
+                "fill-color": "#2F6B3A",
+                "fill-opacity": [
+                  "case",
+                  ["boolean", ["feature-state", "hover"], false],
+                  0.8,
+                  0.4
+                ]
+              }}
+              layout={{ visibility: showAward ? 'visible' : 'none' }}
             />
             <Layer
               id="parcels-line"
@@ -149,6 +167,7 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
                 "line-color": "#10233F", // Registry Ink
                 "line-width": 1
               }}
+              layout={{ visibility: (showSec11 || showAward) ? 'visible' : 'none' }}
             />
             <Layer
               id="corridor-line"
@@ -159,6 +178,7 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
                 "line-width": 4,
                 "line-dasharray": [2, 2]
               }}
+              layout={{ visibility: showCorridor ? 'visible' : 'none' }}
             />
           </Source>
         )}
@@ -187,20 +207,38 @@ export function GISMap({ selectedState = "All States", selectedDistrict = "All D
       </Map>
 
       <div className="absolute bottom-6 left-6 bg-white p-4 border border-graticule-teal/30 shadow-sm text-sm z-10">
-        <h4 className="font-serif mb-2 text-registry-ink font-semibold">Map Legend</h4>
-        <div className="space-y-2 text-registry-ink/80">
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-tilled-earth/40 border border-registry-ink"></div>
-            <span>Section 11 Notification</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-4 bg-cultivated-green/40 border border-registry-ink"></div>
-            <span>Award / Possession</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="w-4 h-1 border-t-2 border-dashed border-tilled-earth"></div>
-            <span>Proposed Alignment</span>
-          </div>
+        <h4 className="font-serif mb-2 text-registry-ink font-semibold">{t("map.legend.title")}</h4>
+        <div className="space-y-3 text-registry-ink/80">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input 
+              type="checkbox" 
+              checked={showSec11} 
+              onChange={(e) => setShowSec11(e.target.checked)}
+              className="accent-tilled-earth"
+            />
+            <div className="w-4 h-4 bg-tilled-earth/40 border border-registry-ink shrink-0"></div>
+            <span>{t("map.legend.sec11")}</span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input 
+              type="checkbox" 
+              checked={showAward} 
+              onChange={(e) => setShowAward(e.target.checked)}
+              className="accent-cultivated-green"
+            />
+            <div className="w-4 h-4 bg-cultivated-green/40 border border-registry-ink shrink-0"></div>
+            <span>{t("map.legend.award")}</span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input 
+              type="checkbox" 
+              checked={showCorridor} 
+              onChange={(e) => setShowCorridor(e.target.checked)}
+              className="accent-tilled-earth"
+            />
+            <div className="w-4 h-1 border-t-2 border-dashed border-tilled-earth shrink-0"></div>
+            <span>{t("map.legend.alignment")}</span>
+          </label>
         </div>
       </div>
     </div>
