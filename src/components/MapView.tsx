@@ -1,7 +1,7 @@
 import { Map as MapIcon, Layers, Filter } from "lucide-react";
 import { GISMap } from "./Map";
 
-export function MapView({ selectedState, selectedDistrict }: { selectedState?: string, selectedDistrict?: string }) {
+export function MapView({ selectedState, selectedDistrict, searchQuery, selectedProject, selectedStage, selectedCategory, selectedRisk }: any) {
   return (
     <div className="flex-1 flex flex-col h-full w-full min-h-0">
       <div className="px-8 py-6 border-b border-graticule-teal/30 bg-white flex justify-between items-center shrink-0">
@@ -57,7 +57,7 @@ export function MapView({ selectedState, selectedDistrict }: { selectedState?: s
         </div>
         <div className="flex-1 relative min-h-0">
           <div className="absolute inset-0">
-            <GISMap selectedState={selectedState} selectedDistrict={selectedDistrict} />
+            <GISMap selectedState={selectedState} selectedDistrict={selectedDistrict} searchQuery={searchQuery} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
           </div>
         </div>
       </div>

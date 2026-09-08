@@ -3,18 +3,18 @@ import { CompensationRecord } from "../types";
 import { HandCoins, CheckCircle2, Clock, AlertCircle } from "lucide-react";
 import { motion } from "motion/react";
 
-export function Compensation() {
+export function Compensation({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [records, setRecords] = useState<CompensationRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/compensation")
+    fetch(`/api/compensation?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then((res) => res.json())
       .then((data) => {
         setRecords(data);
         setIsLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value);

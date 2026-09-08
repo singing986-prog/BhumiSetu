@@ -2,18 +2,18 @@ import { useState, useEffect } from "react";
 import { FileBarChart, Download, Calendar, Filter } from "lucide-react";
 import { ReportRecord } from "../types";
 
-export function Reports() {
+export function Reports({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [reports, setReports] = useState<ReportRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/reports")
+    fetch(`/api/reports?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then(res => res.json())
       .then(data => {
         setReports(data);
         setLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   return (
     <div className="flex-1 flex flex-col p-8 min-h-0 overflow-y-auto">

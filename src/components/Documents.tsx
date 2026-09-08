@@ -3,18 +3,18 @@ import { DocumentRecord } from "../types";
 import { FolderOpen, Download, ShieldCheck, PenTool, Upload } from "lucide-react";
 import { motion } from "motion/react";
 
-export function Documents() {
+export function Documents({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [records, setRecords] = useState<DocumentRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/documents")
+    fetch(`/api/documents?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then((res) => res.json())
       .then((data) => {
         setRecords(data);
         setIsLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   return (
     <div className="p-8 w-full">

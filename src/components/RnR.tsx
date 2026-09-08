@@ -3,18 +3,18 @@ import { RnRRecord } from "../types";
 import { Home, CheckCircle2, Clock } from "lucide-react";
 import { motion } from "motion/react";
 
-export function RnR() {
+export function RnR({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [records, setRecords] = useState<RnRRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/rnr")
+    fetch(`/api/rnr?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then((res) => res.json())
       .then((data) => {
         setRecords(data);
         setIsLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const getStatusIcon = (status: string) => {
     switch (status) {

@@ -5,6 +5,53 @@ type Language = "EN" | "HI";
 type Translations = Record<string, string>;
 
 const enTranslations: Translations = {
+
+  "filter.allStates": "All States",
+  "filter.allDistricts": "All Districts",
+  "filter.allProjects": "All Projects",
+  "filter.allStages": "All Stages",
+  "filter.allCategories": "All Categories",
+  "filter.allRisks": "All Risks",
+  "filter.resetFilters": "Reset Filters",
+  "filter.searchPlaceholder": "Search projects, ULPIN...",
+  "map.drawMode": "Drawing Mode Active",
+  "map.draw": "Draw",
+  "map.measure": "Measure",
+  "map.fullscreen": "Fullscreen",
+  "map.clear": "Clear",
+  "map.cancel": "Cancel",
+  "map.layers": "Layers",
+  "map.search": "Search",
+  "workflow.acquisitionLifecycle": "Acquisition Lifecycle",
+  "workflow.awardDeadlineRisk": "Award Deadline Risk",
+  "workflow.due": "Due",
+  "workflow.blocked": "Blocked",
+  "risk.acquisitionRiskWatch": "Acquisition Risk Watch",
+  "risk.projectsRequireAttention": "projects require immediate attention",
+  "risk.daysOverdue": "days overdue",
+  "risk.contributingRiskFactors": "contributing risk factors",
+  "risk.viewInterventionPlan": "View intervention plan",
+  "stage.details": "Stage Details",
+  "stage.status": "Status",
+  "stage.deadline": "Deadline",
+  "stage.responsibleAuthority": "Responsible Authority",
+  "stage.linkedDocuments": "Linked Documents",
+  "stage.view": "View",
+  "stage.pendingActions": "Pending Actions",
+  "doc.drawerTitle": "Linked Documents",
+  "doc.name": "Document Name",
+  "doc.type": "Type",
+  "doc.version": "Version",
+  "doc.uploadedBy": "Uploaded By",
+  "doc.uploadDate": "Date",
+  "doc.status": "Status",
+  "doc.preview": "Preview",
+  "doc.download": "Download",
+  "doc.history": "History",
+  "doc.previewUnavailable": "Preview unavailable",
+  "doc.currentVersion": "Current Version",
+  "doc.noDocs": "No documents found",
+
   // Navigation
   "nav.dashboard": "National Dashboard",
   "nav.proposals": "Proposals",
@@ -93,6 +140,53 @@ const enTranslations: Translations = {
 };
 
 const hiTranslations: Translations = {
+
+  "filter.allStates": "सभी राज्य",
+  "filter.allDistricts": "सभी जिले",
+  "filter.allProjects": "सभी परियोजनाएं",
+  "filter.allStages": "सभी चरण",
+  "filter.allCategories": "सभी श्रेणियां",
+  "filter.allRisks": "सभी जोखिम",
+  "filter.resetFilters": "फ़िल्टर रीसेट करें",
+  "filter.searchPlaceholder": "परियोजनाएं, ULPIN खोजें...",
+  "map.drawMode": "ड्राइंग मोड सक्रिय",
+  "map.draw": "आकर्षित",
+  "map.measure": "मापना",
+  "map.fullscreen": "पूर्ण स्क्रीन",
+  "map.clear": "साफ़ करें",
+  "map.cancel": "रद्द करें",
+  "map.layers": "परतें",
+  "map.search": "खोजें",
+  "workflow.acquisitionLifecycle": "अधिग्रहण जीवनचक्र",
+  "workflow.awardDeadlineRisk": "पुरस्कार की समय सीमा का जोखिम",
+  "workflow.due": "देय",
+  "workflow.blocked": "अवरुद्ध",
+  "risk.acquisitionRiskWatch": "अधिग्रहण जोखिम निगरानी",
+  "risk.projectsRequireAttention": "परियोजनाओं पर तत्काल ध्यान देने की आवश्यकता है",
+  "risk.daysOverdue": "दिन अतिदेय",
+  "risk.contributingRiskFactors": "योगदान देने वाले जोखिम कारक",
+  "risk.viewInterventionPlan": "हस्तक्षेप योजना देखें",
+  "stage.details": "चरण विवरण",
+  "stage.status": "स्थिति",
+  "stage.deadline": "समय सीमा",
+  "stage.responsibleAuthority": "जिम्मेदार प्राधिकारी",
+  "stage.linkedDocuments": "लिंक किए गए दस्तावेज़",
+  "stage.view": "देखें",
+  "stage.pendingActions": "लंबित कार्य",
+  "doc.drawerTitle": "लिंक किए गए दस्तावेज़",
+  "doc.name": "दस्तावेज़ का नाम",
+  "doc.type": "प्रकार",
+  "doc.version": "संस्करण",
+  "doc.uploadedBy": "द्वारा अपलोड किया गया",
+  "doc.uploadDate": "तारीख",
+  "doc.status": "स्थिति",
+  "doc.preview": "पूर्वावलोकन",
+  "doc.download": "डाउनलोड",
+  "doc.history": "इतिहास",
+  "doc.previewUnavailable": "पूर्वावलोकन उपलब्ध नहीं है",
+  "doc.currentVersion": "वर्तमान संस्करण",
+  "doc.noDocs": "कोई दस्तावेज़ नहीं मिला",
+
   // Navigation
   "nav.dashboard": "राष्ट्रीय डैशबोर्ड",
   "nav.proposals": "प्रस्ताव",
@@ -200,7 +294,14 @@ interface TranslationContextType {
 const TranslationContext = createContext<TranslationContextType | undefined>(undefined);
 
 export function TranslationProvider({ children }: { children: ReactNode }) {
-  const [language, setLanguage] = useState<Language>("EN");
+  const [language, setLanguageState] = useState<Language>(() => {
+    return (localStorage.getItem("bhoomisetu_lang") as Language) || "EN";
+  });
+  
+  const setLanguage = (lang: Language) => {
+    localStorage.setItem("bhoomisetu_lang", lang);
+    setLanguageState(lang);
+  };
 
   const t = (key: string, fallback?: string) => {
     const translations = language === "HI" ? hiTranslations : enTranslations;

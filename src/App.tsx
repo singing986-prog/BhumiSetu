@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Sidebar, TopNav } from "./components/Layout";
 import { KPILedger, WorkflowTracker, PredictiveRisk } from "./components/Dashboard";
 import { GISMap } from "./components/Map";
@@ -16,6 +16,7 @@ import { MapView } from "./components/MapView";
 import { Awards } from "./components/Awards";
 import { Reports } from "./components/Reports";
 import { Grievances } from "./components/Grievance";
+import { FilterBar } from "./components/Dashboard";
 import { useTranslation } from "./i18n";
 import { Login } from "./components/Login";
 import { Settings, User, X, Check } from "lucide-react";
@@ -44,9 +45,45 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedState, setSelectedState] = useState("All States");
   const [selectedDistrict, setSelectedDistrict] = useState("All Districts");
+  const [selectedProject, setSelectedProject] = useState("All Projects");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedStage, setSelectedStage] = useState("All Stages");
+  const [selectedCategory, setSelectedCategory] = useState("All Categories");
+  const [selectedRisk, setSelectedRisk] = useState("All Risks");
   const [autoSync, setAutoSync] = useState(true);
+  const [syncStatus, setSyncStatus] = useState("Live");
+  const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
+
+  useEffect(() => {
+    if (!autoSync) {
+      setSyncStatus("Offline");
+      return;
+    }
+    const interval = setInterval(() => {
+      setSyncStatus("Syncing...");
+      setTimeout(() => {
+        setSyncStatus("Live");
+        setLastSync(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
+      }, 800);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [autoSync]);
   const [activeModal, setActiveModal] = useState<string | null>(null);
+  const [profile, setProfile] = useState({ name: "Ramesh Kumar", email: "ramesh.k@bhoomisetu.gov.in", role: "District LAO", district: "New Delhi" });
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [editProfileForm, setEditProfileForm] = useState({ name: "", email: "" });
+  const [passwordForm, setPasswordForm] = useState({ current: "", newPass: "", confirm: "" });
+  const [passwordState, setPasswordState] = useState({ error: "", success: false });
+  const [notifPrefs, setNotifPrefs] = useState({ email: true, sms: true });
   const { t } = useTranslation();
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetch('/api/profile').then(r => r.json()).then(data => {
+        setProfile(data);
+        setNotifPrefs({ email: data.notifEmail, sms: data.notifSms });
+      });
+    }
+  }, [isAuthenticated]);
 
   if (!isAuthenticated) {
     return <Login onLogin={() => setIsAuthenticated(true)} />;
@@ -56,57 +93,58 @@ export default function App() {
     <div className="min-h-screen bg-survey-paper text-registry-ink flex flex-col font-sans">
       <TopNav 
         setActiveTab={setActiveTab} 
-        selectedState={selectedState}
-        setSelectedState={setSelectedState}
-        selectedDistrict={selectedDistrict}
-        setSelectedDistrict={setSelectedDistrict}
         setIsAuthenticated={setIsAuthenticated}
         openModal={setActiveModal}
+        profile={profile}
       />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+        <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} profile={profile} />
         
-        <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
+        <main className={`flex-1 flex flex-col min-w-0 ${activeTab === "dashboard" ? "overflow-hidden" : "overflow-y-auto"}`}>
           {activeTab === "dashboard" && (
             <>
-              <KPILedger />
-              <div className="flex-1 p-6 flex flex-col lg:flex-row gap-6">
-                <div className="flex-[2] min-h-[500px] lg:min-h-0 flex flex-col shadow-sm">
+              <FilterBar selectedState={selectedState} setSelectedState={setSelectedState} selectedDistrict={selectedDistrict} setSelectedDistrict={setSelectedDistrict} selectedProject={selectedProject} setSelectedProject={setSelectedProject} searchQuery={searchQuery} setSearchQuery={setSearchQuery} selectedStage={selectedStage} setSelectedStage={setSelectedStage} selectedCategory={selectedCategory} setSelectedCategory={setSelectedCategory} selectedRisk={selectedRisk} setSelectedRisk={setSelectedRisk} />
+              <KPILedger selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
+              <div className="flex-1 p-6 flex flex-col xl:flex-row gap-6 min-h-0">
+                <div className="flex-[2] min-h-[400px] xl:min-h-0 flex flex-col shadow-sm relative">
                   <div className="p-4 bg-white border-x border-t border-graticule-teal/30 font-serif font-semibold text-registry-ink flex justify-between items-center">
                     <h2>{t("dashboard.mapTitle")}</h2>
                     <button 
                       onClick={() => setAutoSync(!autoSync)} 
                       className={`text-xs font-sans font-medium px-3 py-1.5 rounded-sm transition-colors cursor-pointer ${autoSync ? 'bg-graticule-teal/10 text-graticule-teal border border-graticule-teal/30 hover:bg-graticule-teal/20' : 'bg-registry-ink/10 text-registry-ink/60 border border-registry-ink/20 hover:bg-registry-ink/20'}`}
                     >
-                      {autoSync ? t("dashboard.autoSyncActive") : t("dashboard.autoSyncPaused")}
+                      {syncStatus === "Live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-cultivated-green mr-1.5 mb-0.5 animate-pulse"></span>}
+   {syncStatus === "Offline" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-registry-ink/40 mr-1.5 mb-0.5"></span>}
+   {syncStatus === "Syncing..." && <span className="inline-block w-1.5 h-1.5 rounded-full bg-graticule-teal mr-1.5 mb-0.5 animate-ping"></span>}
+   {syncStatus} <span className="text-[10px] font-normal opacity-70 ml-1">({lastSync})</span>
                     </button>
                   </div>
                   <div className="flex-1 min-h-0 relative">
                     <div className="absolute inset-0">
-                      <GISMap selectedState={selectedState} selectedDistrict={selectedDistrict} isAutoSync={autoSync} />
+                      <GISMap selectedState={selectedState} selectedDistrict={selectedDistrict} isAutoSync={autoSync} searchQuery={searchQuery} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
                     </div>
                   </div>
                 </div>
                 
-                <div className="flex-1 min-w-[300px] flex flex-col">
-                  <div className="shadow-sm">
-                    <WorkflowTracker />
+                <div className="flex-1 min-w-[350px] flex flex-col gap-6 overflow-y-auto pr-2">
+                  <div className="shadow-sm flex-none">
+                    <WorkflowTracker selectedState={selectedState} selectedDistrict={selectedDistrict} />
                   </div>
-                  <PredictiveRisk />
+                  <PredictiveRisk selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
                 </div>
               </div>
             </>
           )}
 
-          {activeTab === "proposals" && <Proposals />}
-          {activeTab === "compensation" && <Compensation />}
-          {activeTab === "rnr" && <RnR />}
-          {activeTab === "documents" && <Documents />}
-          {activeTab === "alerts" && <AlertsPanel setActiveTab={setActiveTab} />}
-          {activeTab === "map" && <MapView selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "awards" && <Awards />}
-          {activeTab === "reports" && <Reports />}
-          {activeTab === "grievance" && <Grievances />}
+          {activeTab === "proposals" && <Proposals selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "compensation" && <Compensation selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "rnr" && <RnR selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "documents" && <Documents selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "alerts" && <AlertsPanel setActiveTab={setActiveTab} selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "map" && <MapView selectedState={selectedState} selectedDistrict={selectedDistrict} searchQuery={searchQuery} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />}
+          {activeTab === "awards" && <Awards selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "reports" && <Reports selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "grievance" && <Grievances selectedState={selectedState} selectedDistrict={selectedDistrict} />}
 
           {activeTab !== "dashboard" && activeTab !== "proposals" && activeTab !== "compensation" && activeTab !== "rnr" && activeTab !== "documents" && activeTab !== "alerts" && activeTab !== "map" && activeTab !== "awards" && activeTab !== "reports" && activeTab !== "grievance" && (
             <div className="p-8 flex items-center justify-center h-full text-registry-ink/60">
@@ -124,49 +162,123 @@ export default function App() {
         </main>
       </div>
 
-      {activeModal === "profile" && (
-        <Modal title={t("profile.myProfile", "My Profile")} icon={User} onClose={() => setActiveModal(null)}>
+            {activeModal === "profile" && (
+        <Modal title={t("profile.myProfile", "My Profile")} icon={User} onClose={() => { setActiveModal(null); setIsEditingProfile(false); }}>
           <div className="space-y-4">
             <div className="flex justify-center mb-6">
               <div className="w-24 h-24 rounded-full bg-graticule-teal/10 flex items-center justify-center text-4xl text-registry-ink border border-graticule-teal/30">
-                RK
+                {profile.name.substring(0, 2).toUpperCase()}
               </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-registry-ink/60 mb-1">Full Name</label>
-              <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm">Ramesh Kumar</div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-registry-ink/60 mb-1">Email</label>
-              <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm">ramesh.k@bhoomisetu.gov.in</div>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-registry-ink/60 mb-1">Role</label>
-              <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm">District LAO • New Delhi</div>
-            </div>
+            
+            {passwordState.error && activeModal === "profile" && <div className="text-alluvium-red text-xs">{passwordState.error}</div>}
+            {passwordState.success && activeModal === "profile" && <div className="text-cultivated-green text-xs">Profile updated successfully.</div>}
+            
+            {!isEditingProfile ? (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Full Name</label>
+                  <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm">{profile.name}</div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Email</label>
+                  <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm">{profile.email}</div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Role & Jurisdiction</label>
+                  <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm opacity-70">{profile.role} • {profile.district}</div>
+                </div>
+                <button onClick={() => { setEditProfileForm({name: profile.name, email: profile.email}); setIsEditingProfile(true); setPasswordState({error: "", success: false}); }} className="w-full px-4 py-2 border border-registry-ink text-registry-ink rounded-sm text-sm font-medium hover:bg-graticule-teal/5 transition-colors mt-4">
+                  Edit Profile
+                </button>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Full Name</label>
+                  <input type="text" value={editProfileForm.name} onChange={e => setEditProfileForm({...editProfileForm, name: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Email</label>
+                  <input type="email" value={editProfileForm.email} onChange={e => setEditProfileForm({...editProfileForm, email: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-registry-ink/60 mb-1">Role & Jurisdiction (Read Only)</label>
+                  <div className="px-3 py-2 bg-survey-paper/50 border border-graticule-teal/30 rounded-sm text-sm opacity-50">{profile.role} • {profile.district}</div>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button onClick={() => setIsEditingProfile(false)} className="flex-1 px-4 py-2 border border-registry-ink text-registry-ink rounded-sm text-sm font-medium hover:bg-graticule-teal/5 transition-colors">
+                    Cancel
+                  </button>
+                  <button onClick={() => {
+                    fetch('/api/profile', {
+                      method: 'POST', headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({ name: editProfileForm.name, email: editProfileForm.email })
+                    }).then(r => r.json()).then(data => {
+                      setProfile(data);
+                      setIsEditingProfile(false);
+                      setPasswordState({error: "", success: true});
+                    }).catch(e => setPasswordState({error: "Failed to save profile.", success: false}));
+                  }} className="flex-1 px-4 py-2 bg-registry-ink text-white rounded-sm text-sm font-medium hover:bg-registry-ink/90 transition-colors">
+                    Save Changes
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </Modal>
       )}
 
       {activeModal === "settings" && (
-        <Modal title={t("profile.settings", "Account Settings")} icon={Settings} onClose={() => setActiveModal(null)}>
+        <Modal title={t("profile.settings", "Account Settings")} icon={Settings} onClose={() => { setActiveModal(null); setPasswordState({error: "", success: false}); setPasswordForm({current: "", newPass: "", confirm: ""}); }}>
           <div className="space-y-6">
             <div>
               <h3 className="text-sm font-semibold mb-3">Preferences</h3>
               <label className="flex items-center justify-between p-3 border border-graticule-teal/30 rounded-sm cursor-pointer hover:bg-graticule-teal/5 transition-colors">
                 <span className="text-sm">Email Notifications</span>
-                <input type="checkbox" defaultChecked className="accent-tilled-earth w-4 h-4" />
+                <input type="checkbox" checked={notifPrefs.email} onChange={e => {
+                  setNotifPrefs({...notifPrefs, email: e.target.checked});
+                  fetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifEmail: e.target.checked }) });
+                }} className="accent-tilled-earth w-4 h-4" />
               </label>
               <label className="flex items-center justify-between p-3 border border-graticule-teal/30 rounded-sm cursor-pointer hover:bg-graticule-teal/5 transition-colors mt-2">
                 <span className="text-sm">SMS Alerts</span>
-                <input type="checkbox" defaultChecked className="accent-tilled-earth w-4 h-4" />
+                <input type="checkbox" checked={notifPrefs.sms} onChange={e => {
+                  setNotifPrefs({...notifPrefs, sms: e.target.checked});
+                  fetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifSms: e.target.checked }) });
+                }} className="accent-tilled-earth w-4 h-4" />
               </label>
             </div>
-            <div>
-              <h3 className="text-sm font-semibold mb-3">Security</h3>
-              <button className="w-full px-4 py-2 bg-registry-ink text-white rounded-sm text-sm font-medium hover:bg-registry-ink/90 transition-colors">
-                Change Password
-              </button>
+            
+            <div className="pt-2 border-t border-graticule-teal/10">
+              <h3 className="text-sm font-semibold mb-3">Change Password</h3>
+              {passwordState.error && <div className="text-alluvium-red text-xs mb-2">{passwordState.error}</div>}
+              {passwordState.success && <div className="text-cultivated-green text-xs mb-2">Password changed successfully. Please log in again.</div>}
+              
+              <div className="space-y-3">
+                <input type="password" placeholder="Current Password" value={passwordForm.current} onChange={e => setPasswordForm({...passwordForm, current: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <input type="password" placeholder="New Password" value={passwordForm.newPass} onChange={e => setPasswordForm({...passwordForm, newPass: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <input type="password" placeholder="Confirm New Password" value={passwordForm.confirm} onChange={e => setPasswordForm({...passwordForm, confirm: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <button onClick={() => {
+                  if (passwordForm.newPass !== passwordForm.confirm) {
+                    setPasswordState({error: "Passwords do not match", success: false});
+                    return;
+                  }
+                  fetch('/api/password', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ current: passwordForm.current, newPass: passwordForm.newPass })
+                  }).then(r => r.json()).then(data => {
+                    if (data.error) setPasswordState({error: data.error, success: false});
+                    else {
+                      setPasswordState({error: "", success: true});
+                      setPasswordForm({current: "", newPass: "", confirm: ""});
+                      setTimeout(() => setIsAuthenticated(false), 2000); // Logout after change
+                    }
+                  }).catch(e => setPasswordState({error: "Server error", success: false}));
+                }} className="w-full px-4 py-2 bg-registry-ink text-white rounded-sm text-sm font-medium hover:bg-registry-ink/90 transition-colors mt-2">
+                  Update Password
+                </button>
+              </div>
             </div>
           </div>
         </Modal>

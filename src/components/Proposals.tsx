@@ -1,10 +1,11 @@
+import React from 'react';
 import { useState, useEffect } from "react";
 import { Proposal } from "../types";
 import { Plus, ArrowLeft, Clock, CheckCircle2, AlertCircle, FileText } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "../i18n";
 
-export function Proposals() {
+export function Proposals({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const { t } = useTranslation();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [view, setView] = useState<"list" | "create">("list");
@@ -12,12 +13,12 @@ export function Proposals() {
 
   useEffect(() => {
     fetchProposals();
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const fetchProposals = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/proposals");
+      const res = await fetch(`/api/proposals?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`);
       const data = await res.json();
       setProposals(data);
     } catch (err) {

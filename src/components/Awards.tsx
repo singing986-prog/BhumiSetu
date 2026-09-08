@@ -2,18 +2,18 @@ import { useState, useEffect } from "react";
 import { ClipboardCheck, Download, Eye, FileSignature } from "lucide-react";
 import { AwardRecord } from "../types";
 
-export function Awards() {
+export function Awards({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [awards, setAwards] = useState<AwardRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/awards")
+    fetch(`/api/awards?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then(res => res.json())
       .then(data => {
         setAwards(data);
         setLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const getStatusStyle = (status: string) => {
     switch (status) {

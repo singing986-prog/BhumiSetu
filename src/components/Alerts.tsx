@@ -1,20 +1,21 @@
+import React from 'react';
 import { useState, useEffect } from "react";
 import { Alert } from "../types";
 import { Bell, AlertTriangle, Info, Clock, ShieldAlert, X } from "lucide-react";
 import { motion } from "motion/react";
 
-export function AlertsPanel({ setActiveTab }: { setActiveTab: (tab: string) => void }) {
+export function AlertsPanel({ setActiveTab, selectedState = "All States", selectedDistrict = "All Districts" }: { setActiveTab: (tab: string) => void, selectedState?: string, selectedDistrict?: string }) {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/alerts")
+    fetch(`/api/alerts?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then((res) => res.json())
       .then((data) => {
         setAlerts(data);
         setIsLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const dismissAlert = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();

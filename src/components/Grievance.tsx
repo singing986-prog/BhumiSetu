@@ -2,18 +2,18 @@ import { useState, useEffect } from "react";
 import { ShieldAlert, Search, Filter, MessageSquare, AlertCircle } from "lucide-react";
 import { GrievanceRecord } from "../types";
 
-export function Grievances() {
+export function Grievances({ selectedState = "All States", selectedDistrict = "All Districts" }: { selectedState?: string, selectedDistrict?: string }) {
   const [grievances, setGrievances] = useState<GrievanceRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/grievances")
+    fetch(`/api/grievances?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then(res => res.json())
       .then(data => {
         setGrievances(data);
         setLoading(false);
       });
-  }, []);
+  }, [selectedState, selectedDistrict]);
 
   const getPriorityStyle = (priority: string) => {
     switch (priority) {
