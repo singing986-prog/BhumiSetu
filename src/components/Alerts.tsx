@@ -1,3 +1,4 @@
+import { apiFetch } from "../api";
 import React from 'react';
 import { useState, useEffect } from "react";
 import { Alert } from "../types";
@@ -9,7 +10,7 @@ export function AlertsPanel({ setActiveTab, selectedState = "All States", select
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`/api/alerts?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
+    apiFetch(`/api/alerts?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then((res) => res.json())
       .then((data) => {
         setAlerts(data);

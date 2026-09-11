@@ -1,0 +1,71 @@
+266 OPEN 1            <div className={`w-10 h-5 rounded-full transition-colors relative ${visibleLayers[layer.id] ? 'bg-tilled-earth' : 'bg-gray-200'}`}>
+268 CLOSE 1            </div>
+287 OPEN 1     <div className="w-full h-full relative flex">
+289 OPEN 1         <div className="w-64 bg-white border-r border-graticule-teal/30 p-6 flex flex-col gap-6 overflow-y-auto shrink-0 z-10 shadow-sm relative">
+290 OPEN 1           <div>
+295 OPEN 1             <div className="space-y-4">
+297 CLOSE 1             </div>
+298 CLOSE 1           </div>
+300 OPEN 1           <div className="pt-6 border-t border-graticule-teal/20 mt-auto">
+313 OPEN 1               <div className="mt-4 p-3 bg-survey-paper/50 border border-graticule-teal/20 rounded-sm flex flex-col gap-2">
+315 OPEN 1                 <div className="flex justify-between text-xs">
+320 CLOSE 1                 </div>
+321 OPEN 1                 <div className="flex justify-between text-xs">
+326 CLOSE 1                 </div>
+333 OPEN 1                     <div className="text-[10px] text-alluvium-red font-medium mt-1 p-1 bg-alluvium-red/10 rounded-sm">
+335 CLOSE 1                     </div>
+338 CLOSE 1               </div>
+340 CLOSE 1           </div>
+341 CLOSE 1         </div>
+344 OPEN 1       <div className="flex-1 relative h-full">
+482 OPEN 1             <div className="absolute bg-white p-3 rounded-sm shadow-lg border border-graticule-teal/20 text-xs pointer-events-none z-50 max-w-xs" style={{ left: hoverInfo.longitude, top: hoverInfo.latitude, transform: 'translate(10px, 10px)' }}>
+483 OPEN 1               <div className="font-semibold mb-1 text-registry-ink border-b border-graticule-teal/10 pb-1">
+485 CLOSE 1               </div>
+487 OPEN 1                 <div key={key} className="flex justify-between gap-4 py-0.5">
+490 CLOSE 1                 </div>
+492 CLOSE 1             </div>
+497 OPEN 1       <div className="absolute bottom-6 left-4 bg-white p-4 border border-graticule-teal/30 shadow-lg rounded-sm z-10">
+499 OPEN 1         <div className="flex flex-col gap-2">
+512 OPEN 1               <div key={layer.id} className="flex items-center gap-2">
+519 CLOSE 1               </div>
+525 CLOSE 1         </div>
+526 CLOSE 1       </div>
+529 OPEN 1         <div className="absolute top-4 left-4 bg-white border border-graticule-teal/30 shadow-md rounded-sm z-10 flex flex-col">
+543 CLOSE 1         </div>
+547 OPEN 1           <div className="absolute top-4 left-16 ml-2 bg-white border border-graticule-teal/30 shadow-md rounded-sm z-10 flex flex-col w-64">
+548 OPEN 1             <div className="p-3 border-b border-graticule-teal/20 bg-survey-paper/50 flex justify-between items-center">
+551 CLOSE 1             </div>
+552 OPEN 1             <div className="p-3 flex flex-col gap-2">
+593 CLOSE 1             </div>
+594 CLOSE 1           </div>
+599 OPEN 1           <div className="absolute top-4 left-16 ml-2 bg-white w-64 border border-graticule-teal/30 shadow-md rounded-sm z-10 flex flex-col">
+600 OPEN 1             <div className="p-3 border-b border-graticule-teal/20 bg-survey-paper/50 flex justify-between items-center">
+603 CLOSE 1             </div>
+604 OPEN 1             <div className="p-3 space-y-3">
+606 CLOSE 1             </div>
+607 CLOSE 1           </div>
+614 OPEN 1         <div className="absolute top-4 right-4 bg-white w-80 border border-graticule-teal/30 shadow-lg rounded-sm z-10 flex flex-col max-h-[calc(100%-2rem)] overflow-hidden">
+615 OPEN 1           <div className="p-4 border-b border-graticule-teal/20 bg-survey-paper/50 flex justify-between items-center shrink-0">
+619 OPEN 1             <div className="flex gap-2">
+630 CLOSE 1             </div>
+631 CLOSE 1           </div>
+632 OPEN 1           <div className="p-0 overflow-y-auto">
+634 OPEN 1                 <div className="flex flex-col">
+635 OPEN 1                    <div className="grid grid-cols-2 gap-x-2 gap-y-3 p-4 border-b border-graticule-teal/10">
+643 CLOSE 1                    </div>
+644 OPEN 1                    <div className="flex flex-col p-4 bg-survey-paper/20 gap-3">
+646 OPEN 1                      <div className="grid grid-cols-2 gap-2">
+651 CLOSE 1                      </div>
+653 OPEN 1                    <div className="p-3 bg-white border-t border-graticule-teal/20 grid grid-cols-2 gap-2">
+688 CLOSE 1                    </div>
+689 CLOSE 1                 </div>
+691 OPEN 1                 <div className="p-4 space-y-4">
+695 OPEN 1                       <div key={key} className="flex flex-col gap-1 border-b border-graticule-teal/10 pb-2 last:border-0">
+698 CLOSE 1                       </div>
+701 CLOSE 1                 </div>
+703 CLOSE 1           </div>
+704 CLOSE 1         </div>
+708 OPEN 1           <div className="absolute bottom-6 right-6 bg-white p-4 border border-graticule-teal/30 shadow-md rounded-sm z-10 flex flex-col gap-1">
+712 CLOSE 1           </div>
+715 CLOSE 1       </div>
+716 CLOSE 1     </div>

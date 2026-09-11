@@ -1,12 +1,24 @@
+import { apiFetch } from "../api";
 import React, { useState, useRef, useEffect } from "react";
 import { Map as MapIcon, FileText, ClipboardCheck, HandCoins, Home, FileBarChart, ShieldAlert, Bell, User, LayoutDashboard, Database, FolderOpen, Settings, LogOut } from "lucide-react";
+
 import { useTranslation } from "../i18n";
 
-export function Sidebar({ activeTab, setActiveTab, profile = { name: "Ramesh Kumar", district: "New Delhi", role: "District LAO" } }: { activeTab: string, setActiveTab: (tab: string) => void, profile?: any }) {
+
+export function Sidebar({ activeTab, setActiveTab, profile }: { activeTab: string, setActiveTab: (tab: string) => void, profile?: any }) {
   const { t } = useTranslation();
 
-  const tabs = [
-    { id: "dashboard", label: t("nav.dashboard"), icon: LayoutDashboard },
+  
+  let dashboardLabel = t("nav.dashboard");
+  if (profile?.role === "State Nodal Officer") dashboardLabel = t("nav.dashboardState", "State Dashboard");
+  else if (profile?.role === "District LAO") dashboardLabel = t("nav.dashboardDistrict", "District Dashboard");
+  else if (profile?.role === "Project Implementing Agency") dashboardLabel = t("nav.dashboardProject", "Project Dashboard");
+  else if (profile?.role === "Field Surveyor") dashboardLabel = t("nav.dashboardField", "Field Dashboard");
+  else if (profile?.role === "Affected Citizen") dashboardLabel = t("nav.dashboardCitizen", "My Case");
+  else if (profile?.role === "Super Admin" || profile?.role === "Central Ministry Officer" || profile?.role === "Auditor") dashboardLabel = t("nav.dashboardNational", "National Dashboard");
+
+  const allTabs = [
+        { id: "dashboard", label: dashboardLabel, icon: LayoutDashboard },
     { id: "proposals", label: t("nav.proposals"), icon: FileText },
     { id: "map", label: t("nav.map"), icon: MapIcon },
     { id: "compensation", label: t("nav.compensation"), icon: HandCoins },
@@ -16,6 +28,18 @@ export function Sidebar({ activeTab, setActiveTab, profile = { name: "Ramesh Kum
     { id: "reports", label: t("nav.reports"), icon: FileBarChart },
     { id: "grievance", label: t("nav.grievance"), icon: ShieldAlert },
   ];
+
+  let allowedTabIds = ["dashboard", "proposals", "map", "compensation", "rnr", "documents", "awards", "reports", "grievance"];
+  if (profile && profile.role) {
+    if (profile.role === 'Affected Citizen') {
+       allowedTabIds = ["map", "compensation", "rnr", "grievance"];
+    } else if (profile.role === 'Auditor') {
+       allowedTabIds = ["dashboard", "map", "reports"];
+    } else if (profile.role === 'Field Surveyor') {
+       allowedTabIds = ["map", "documents"];
+    }
+  }
+  const tabs = allTabs.filter(t => allowedTabIds.includes(t.id));
 
   return (
     <aside className="w-64 border-r border-graticule-teal/30 h-[calc(100vh-64px)] overflow-y-auto bg-survey-paper flex flex-col hidden md:flex">
@@ -37,8 +61,12 @@ export function Sidebar({ activeTab, setActiveTab, profile = { name: "Ramesh Kum
       </nav>
       <div className="p-4 border-t border-graticule-teal/30">
         <div className="text-xs text-graticule-teal mb-2 font-mono uppercase tracking-wider">{t("header.sessionInfo")}</div>
-        <div className="text-sm font-medium">{t("header.role")}</div>
-        <div className="text-xs text-survey-paper/70">{profile.district}, NCT</div>
+        <div className="text-sm font-medium">{profile?.role || "User"}</div>
+        <div className="text-xs text-survey-paper/70">
+          {profile?.district !== "All" && profile?.district !== "All Districts" ? profile?.district : ""}
+          {profile?.district !== "All" && profile?.district !== "All Districts" && profile?.state !== "All" && profile?.state !== "All States" ? ", " : ""}
+          {profile?.state !== "All" && profile?.state !== "All States" ? profile?.state : "National Level"}
+        </div>
       </div>
     </aside>
   );
@@ -48,7 +76,7 @@ export function TopNav({
   setActiveTab,
   setIsAuthenticated,
   openModal,
-  profile = { name: "Ramesh Kumar", role: "District LAO", email: "ramesh.k@bhoomisetu.gov.in", district: "New Delhi" }
+  profile
 }: { 
   setActiveTab?: (tab: string) => void,
   setIsAuthenticated?: (auth: boolean) => void,
@@ -63,7 +91,7 @@ export function TopNav({
   const [isAlertsOpen, setIsAlertsOpen] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
   useEffect(() => {
-    fetch('/api/notifications').then(r => r.json()).then(data => setNotifications(data));
+    apiFetch('/api/notifications').then(r => r.json()).then(data => setNotifications(data));
   }, []);
   /*
     { id: 1, title: "Section 24(2) Lapse Risk", msg: "Award is 4.8 years old with pending possession for CBIC Node 2.", time: "2 mins ago", loc: "Kanchipuram", read: false, severity: "high" },
@@ -141,7 +169,7 @@ export function TopNav({
               <div className="absolute right-0 mt-3 w-80 bg-white border border-graticule-teal/30 rounded-sm shadow-lg z-50 overflow-hidden">
                 <div className="px-4 py-3 border-b border-graticule-teal/10 bg-survey-paper/50 flex justify-between items-center">
                   <h3 className="font-semibold text-registry-ink text-sm">Notifications</h3>
-                  <button onClick={() => fetch('/api/notifications/read', {method: 'POST'}).then(r => r.json()).then(data => setNotifications(data))} className="text-xs text-graticule-teal hover:underline outline-none font-medium">Mark all as read</button>
+                  <button onClick={() => apiFetch('/api/notifications/read', {method: 'POST'}).then(r => r.json()).then(data => setNotifications(data))} className="text-xs text-graticule-teal hover:underline outline-none font-medium">Mark all as read</button>
                 </div>
                 <div className="max-h-80 overflow-y-auto">
                   {notifications.length === 0 ? (
@@ -201,7 +229,7 @@ export function TopNav({
                 </div>
                 <div className="py-1 border-t border-graticule-teal/10">
                   <button 
-                    onClick={() => { setIsProfileOpen(false); if (setIsAuthenticated) setIsAuthenticated(false); }}
+                    onClick={async () => { setIsProfileOpen(false); try { await fetch("/api/auth/logout", { method: "POST", headers: { "Authorization": `Bearer ${localStorage.getItem("bhoomi_token")}` }}); } catch (e) {} if (setIsAuthenticated) { setIsAuthenticated(false); localStorage.removeItem("bhoomi_token"); localStorage.removeItem("bhoomi_refresh"); } }}
                     className="w-full text-left px-4 py-2 text-sm text-alluvium-red hover:bg-alluvium-red/5 flex items-center gap-2 transition-colors"
                   >
                     <LogOut className="w-4 h-4" />

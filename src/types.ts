@@ -48,50 +48,176 @@ export interface Alert {
 
 export interface CompensationRecord {
   id: string;
+  referenceId: string;
+  projectId: string;
+  parcelId: string;
   ulpin: string;
-  ownerName: string;
+  beneficiaryId: string;
+  beneficiaryName: string;
+  state: string;
+  district: string;
+  village: string;
+  area: number;
   marketValue: number;
   solatium: number;
+  additionalComponents: { code: string; label: string; amount: number }[];
   totalAssessed: number;
-  amountDisbursed: number;
-  disbursementDate: string | null;
-  status: 'Pending' | 'Processing DBT' | 'Disbursed';
+  approvedAmount: number;
+  disbursedAmount: number;
+  balanceAmount: number;
+  assessmentStatus: "DRAFT" | "ASSESSED" | "SUBMITTED" | "APPROVED" | "RETURNED" | "REJECTED";
+  paymentStatus: "PENDING" | "PAYMENT_INITIATED" | "PARTIALLY_PAID" | "PAID";
+  paymentHistory: { id: string; reference: string; amount: number; date: string; status: string; initiatedBy: string }[];
+  awardId?: string;
+  paymentReference?: string;
+  paymentDate?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RnRRecord {
   id: string;
+  referenceId: string;
+  projectId: string;
+  parcelId: string;
   ulpin: string;
+  familyId: string;
   familyHead: string;
-  category: 'Owner' | 'Tenant' | 'Agricultural Labourer';
-  displacementStatus: 'Displaced' | 'Affected Not Displaced';
-  entitlements: {
-    housing: boolean;
-    employment: boolean;
-    annuity: boolean;
-  };
-  overallStatus: 'Pending' | 'In Progress' | 'Settled';
+  memberCount: number;
+  state: string;
+  district: string;
+  village: string;
+  category: string;
+
+  eligibilityStatus: "NOT_ASSESSED" | "ELIGIBLE" | "INELIGIBLE" | "UNDER_REVIEW";
+  entitlementStatus: "PENDING" | "ASSESSED";
+
+  housingStatus: "NOT_APPLICABLE" | "PENDING" | "APPROVED" | "ALLOCATED" | "PROVIDED";
+  housingEntitlement: boolean;
+  housingAllotment?: string;
+
+  landEntitlement: boolean;
+  landAllotment?: string;
+  landStatus: "NOT_APPLICABLE" | "PENDING" | "ALLOCATED";
+
+  livelihoodStatus: "NOT_APPLICABLE" | "PENDING" | "IN_PROGRESS" | "COMPLETED";
+  livelihoodEntitlement: boolean;
+  livelihoodAssistance: number;
+  trainingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED";
+
+  assistanceAssessed: number;
+  assistancePaid: number;
+  assistanceBalance: number;
+
+  relocationRequired: boolean;
+  relocationStatus: "NOT_REQUIRED" | "PLANNED" | "IN_PROGRESS" | "COMPLETED";
+  relocationDate?: string;
+
+  verificationStatus: "PENDING" | "VERIFIED" | "RETURNED";
+  verifiedBy?: string;
+  verifiedAt?: string;
+
+  approvalStatus: "DRAFT" | "UNDER_REVIEW" | "APPROVED" | "RETURNED" | "REJECTED" | "IMPLEMENTATION_IN_PROGRESS" | "SETTLED";
+  approvedBy?: string;
+  approvedAt?: string;
+  remarks?: string;
+
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DocumentRecord {
   id: string;
   title: string;
+  fileName: string;
   type: string;
   version: string;
+  
+  projectId: string;
+  parcelId?: string;
+  ulpin?: string;
+  rnrId?: string;
+  compensationId?: string;
+  workflowId?: string;
+
   uploadedBy: string;
-  uploadDate: string;
+  uploadedByRole: string;
+  uploadedAt: string;
+
+  fileSize: string;
+  mimeType: string;
+  storagePath: string;
+
   checksum: string;
-  status: 'Verified' | 'Pending Signature';
+  checksumAlgorithm: string;
+
+  integrityStatus: "NOT_VERIFIED" | "VERIFIED" | "INTEGRITY_MISMATCH";
+  signatureStatus: "NOT_SIGNED" | "PENDING_SIGNATURE" | "SIGNED" | "SIGNATURE_INVALID";
+  status: "DRAFT" | "PENDING_REVIEW" | "VERIFIED" | "REJECTED" | "ARCHIVED";
+  
+  remarks?: string;
+}
+
+export interface DocumentVersion {
+  versionId: string;
+  documentId: string;
+  version: string;
+  fileName: string;
+  uploadedBy: string;
+  uploadedByRole: string;
+  uploadedAt: string;
+  fileSize: string;
+  mimeType: string;
+  storagePath: string;
+  checksum: string;
+  checksumAlgorithm: string;
+  remarks?: string;
+}
+
+export interface AwardItem {
+  id: string; // awardItemId
+  awardId: string;
+  projectId: string;
+  parcelId: string;
+  ulpin: string;
+  beneficiaryId: string;
+  beneficiaryName: string;
+  compensationId?: string;
+  rnrId?: string;
+  eligibleAmount: number;
+  awardAmount: number;
+  status: string;
+  remarks?: string;
 }
 
 export interface AwardRecord {
-  id: string;
+  id: string; // awardId
+  referenceId: string;
   projectId: string;
   projectName: string;
-  date: string;
+  state: string;
+  district: string;
+  issueDate?: string;
+  status: "DRAFT" | "SUBMITTED" | "VERIFIED" | "RETURNED" | "APPROVED" | "REJECTED" | "ISSUED";
+  beneficiaryCount: number;
   totalAmount: number;
-  beneficiariesCount: number;
-  status: 'Draft' | 'Under Review' | 'Published';
-  issuingAuthority: string;
+  awardItems: AwardItem[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  verifiedBy?: string;
+  verifiedAt?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  issuedBy?: string;
+  issuedAt?: string;
+  rejectedBy?: string;
+  rejectedAt?: string;
+  remarks?: string;
+  rejectionReason?: string;
+  documentId?: string;
 }
 
 export interface ReportRecord {

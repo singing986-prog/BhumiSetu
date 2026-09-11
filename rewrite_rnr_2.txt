@@ -1,0 +1,155 @@
+
+  const apiCall = (endpoint: string, payload: any, modalSetter: any) => {
+    setErrorMsg("");
+    apiFetch(`/api/rnr/${selectedRecord?.id}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    })
+    .then(res => res.json().then(data => ({status: res.status, data})))
+    .then(({status, data}) => {
+      if (status >= 400) {
+        setErrorMsg(data.error || "Operation failed");
+      } else {
+        modalSetter(false);
+        loadData();
+      }
+    })
+    .catch(err => setErrorMsg("Network error"));
+  };
+
+  // Internal state for modls
+  const [eligibilityStatus, setEligibilityStatus] = useState("ELIGIBLE");
+  const [entitlements, setEntitlements] = useState({ housingEntitlement: false, landEntitlement: false, livelihoodEntitlement: false, assistanceAssessed: 0, relocationRequired: false });
+  const [verifyStatus, setVerifyStatus] = useState("VERIFIED");
+  const [approveStatus, setApproveStatus] = useState("APPROVED");
+  const [payAmount, setPayAmount] = useState(0);
+  const [implementation, setImplementation] = useState({ housingStatus: "", landStatus: "", livelihoodStatus: "", trainingStatus: "", relocationStatus: "", markSettled: false });
+
+  const isNodal = profile?.role === "State Nodal Officer" || profile?.role === "Central Ministry";
+  const isLao = profile?.role === "District LAO";
+  const isSurveyor = profile?.role === "Field Surveyor";
+  const canAssess = isLao || isSurveyor;
+  const canVerify = isLao || isSurveyor;
+  const canApprove = isNodal || isLao;
+
+  return (
+    <div className="p-8 w-full max-w-7xl mx-auto">
+      <div className="flex justify-between items-end mb-8">
+        <div>
+          <h2 className="text-3xl font-serif font-semibold text-registry-ink flex items-center gap-3">
+            <Home className="w-8 h-8 text-tilled-earth" />
+            {t("rnr.title", "Rehabilitation & Resettlement")}
+          </h2>
+          <p className="text-registry-ink/60 mt-1">Manage affected families register and track statutory entitlements.</p>
+        </div>
+      </div>
+
+      <div className="flex gap-4 mb-6">
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 absolute left-3 top-3 text-graticule-teal" />
+          <input 
+            type="text" 
+            placeholder="Search Reference ID, ULPIN, Family Head..."
+            className="w-full pl-9 pr-4 py-2 border border-graticule-teal/30 focus:border-graticule-teal outline-none bg-white text-sm rounded-sm"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <select className="border border-graticule-teal/30 px-4 py-2 outline-none bg-white text-sm rounded-sm text-registry-ink/80"
+          value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+          <option>All Categories</option>
+          <option>Displaced</option>
+          <option>Affected Not Displaced</option>
+        </select>
+        <select className="border border-graticule-teal/30 px-4 py-2 outline-none bg-white text-sm rounded-sm text-registry-ink/80"
+          value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option>All Statuses</option>
+          <option value="DRAFT">Draft</option>
+          <option value="UNDER_REVIEW">Under Review</option>
+          <option value="APPROVED">Approved</option>
+          <option value="IMPLEMENTATION_IN_PROGRESS">Implementation In Progress</option>
+          <option value="SETTLED">Settled</option>
+        </select>
+      </div>
+
+      <div className="bg-white border border-graticule-teal/30 shadow-sm overflow-hidden rounded-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm whitespace-nowrap">
+            <thead>
+              <tr className="bg-graticule-teal/10 border-b border-graticule-teal/30 text-registry-ink font-semibold">
+                <th className="px-6 py-4 font-mono uppercase tracking-wider text-[10px]">Ref ID</th>
+                <th className="px-6 py-4 font-mono uppercase tracking-wider text-[10px]">Parcel ID</th>
+                <th className="px-6 py-4">Family Head</th>
+                <th className="px-6 py-4">Category</th>
+                <th className="px-6 py-4">Financial Assistance</th>
+                <th className="px-6 py-4">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-graticule-teal/20">
+              {isLoading ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-graticule-teal animate-pulse">
+                    Loading R&R records...
+                  </td>
+                </tr>
+              ) : records.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-registry-ink/60">
+                    No R&R records found.
+                  </td>
+                </tr>
+              ) : (
+                records.map((record, i) => (
+                  <motion.tr 
+                    initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}
+                    key={record.id} 
+                    onClick={() => setSelectedRecord(record)}
+                    className="hover:bg-graticule-teal/5 transition-colors cursor-pointer"
+                  >
+                    <td className="px-6 py-4 font-mono text-xs text-graticule-teal">{record.referenceId}</td>
+                    <td className="px-6 py-4 font-mono text-xs text-registry-ink/80">{record.parcelId}</td>
+                    <td className="px-6 py-4">
+                      <div className="font-medium text-registry-ink">{record.familyHead}</div>
+                      <div className="text-xs text-registry-ink/60">{record.memberCount} Members</div>
+                    </td>
+                    <td className="px-6 py-4 text-registry-ink/80">{record.category}</td>
+                    <td className="px-6 py-4">
+                      <div className="font-mono text-xs text-registry-ink">Assessed: ₹{record.assistanceAssessed?.toLocaleString('en-IN') || 0}</div>
+                      <div className="font-mono text-xs text-cultivated-green">Paid: ₹{record.assistancePaid?.toLocaleString('en-IN') || 0}</div>
+                    </td>
+                    <td className="px-6 py-4">
+                      {getStatusBadge(record.approvalStatus)}
+                    </td>
+                  </motion.tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      
+      {/* Details Modal */}
+      <AnimatePresence>
+        {selectedRecord && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-registry-ink/20 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white border border-graticule-teal/30 shadow-2xl rounded-sm w-full max-w-6xl max-h-[90vh] flex flex-col"
+            >
+               {/* Modal Header */}
+               <div className="p-6 border-b border-graticule-teal/30 flex justify-between items-start bg-survey-paper/50">
+                  <div>
+                     <div className="flex items-center gap-3 mb-2">
+                        <span className="font-mono text-xs font-bold text-graticule-teal uppercase tracking-wider">
+                           {selectedRecord.referenceId}
+                        </span>
+                        {getStatusBadge(selectedRecord.approvalStatus)}
+                     </div>
+                     <h3 className="text-2xl font-serif text-registry-ink">{selectedRecord.familyHead}</h3>
+                     <p className="text-registry-ink/60 text-sm mt-1">{selectedRecord.village}, {selectedRecord.district}, {selectedRecord.state}</p>
+                  </div>
+                  <button onClick={() => setSelectedRecord(null)} className="p-2 hover:bg-graticule-teal/10 rounded-sm text-registry-ink/60 transition-colors">
+                     <X className="w-5 h-5" />
+                  </button>
+               </div>

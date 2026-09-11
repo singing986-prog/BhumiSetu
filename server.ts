@@ -1,329 +1,1755 @@
+import multer from "multer";
+import crypto from "crypto";
+import fs from "fs";
 import express from "express";
 import path from "path";
+import * as turf from "@turf/turf";
 import { WebSocketServer } from "ws";
 import { createServer as createViteServer } from "vite";
+
+import * as argon2 from 'argon2';
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET || 'bhoomi-setu-super-secret-key';
+const REFRESH_SECRET = process.env.REFRESH_SECRET || 'bhoomi-setu-refresh-secret';
+
+const demoUsers = [
+  { id: 'u1', email: 'admin@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Super Admin', name: 'System Admin', district: 'All', state: 'All' },
+  { id: 'u2', email: 'cmo@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Central Ministry Officer', name: 'CMO user', district: 'All', state: 'All' },
+  { id: 'u3', email: 'sno@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'State Nodal Officer', name: 'SNO User', district: 'All', state: 'Delhi' },
+  { id: 'u4', email: 'lao.district@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'District LAO', name: 'LAO User', district: 'South Delhi', state: 'Delhi' },
+  { id: 'u5', email: 'pia@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Project Implementing Agency', name: 'PIA User', district: 'All', state: 'All', assignedProjects: ['PRJ-2026-001', 'PRJ-2026-003'] },
+  { id: 'u6', email: 'surveyor@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Field Surveyor', name: 'Surveyor User', district: 'South Delhi', state: 'Delhi', assignedParcels: ['PAR-SD-001', 'PAR-SD-002'] },
+  { id: 'u7', email: 'auditor@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Auditor', name: 'Auditor User', district: 'All', state: 'All' },
+  { id: 'u8', email: 'citizen@bhoomisetu.gov.in', passwordHash: '', tokenVersion: 0, role: 'Affected Citizen', name: 'Citizen User', district: 'South Delhi', state: 'Delhi', ulpin: '06122344556677' }
+];
+
+
+// ==========================================
+// AUDIT LOG REPOSITORY ABSTRACTION
+// ==========================================
+// Production Deployment Note: Migrate InMemoryAuditLogRepository 
+// to PostgreSQL/Firestore via an ORM/Driver.
+interface AuditLogRepository {
+  log(event: string, email: string, role: string, result: string, details?: any): void;
+  getLogs(): any[];
+}
+class InMemoryAuditLogRepository implements AuditLogRepository {
+  private logs: any[] = [];
+  log(event: string, email: string, role: string, result: string, details?: any) {
+    this.logs.push({ timestamp: new Date().toISOString(), event, email, role, result, details });
+    console.log(`[AUDIT] ${event} | ${email} | ${result}`);
+  }
+  getLogs() {
+    return this.logs;
+  }
+}
+const failedAttempts = new Map<string, { count: number, lockUntil: number }>();
+const otpSessions = new Map<string, { otp: string, expiresAt: number, attempts: number, lastRequestedAt: number }>();
+const auditRepo = new InMemoryAuditLogRepository();
+const auditLogs = { push: (obj: any) => auditRepo.log(obj.event, obj.email, obj.role, obj.result, obj.details) }; // Legacy compat
+function logAudit(event: string, email: string, role: string, result: string, details?: any) {
+  auditRepo.log(event, email, role, result, details);
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
 
+
+  // JWT Middleware
+  const authorizeRoles = (...roles) => {
+    return (req, res, next) => {
+      const user = (req as any).user;
+      if (!user || !roles.includes(user.role)) {
+        return res.status(403).json({ error: 'ERR_FORBIDDEN' });
+      }
+      next();
+    };
+  };
+
+  const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token == null) return res.status(401).json({ error: "Unauthorized" });
+    
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) return res.status(403).json({ error: "Forbidden" });
+      (req as any).user = user;
+      next();
+    });
+  };
+
+  // Auth Endpoints
+  
+  app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    
+    const attempts = failedAttempts.get(email) || { count: 0, lockUntil: 0 };
+    if (Date.now() < attempts.lockUntil) {
+      logAudit('LOGIN_FAILED', email, 'Unknown', 'ACCOUNT_LOCKED');
+      return res.status(429).json({ error: 'ERR_ACCOUNT_LOCKED' });
+    }
+    
+    const user = demoUsers.find(u => u.email === email);
+    if (!user) {
+      attempts.count += 1;
+      failedAttempts.set(email, attempts);
+      logAudit('LOGIN_FAILED', email, 'Unknown', 'INVALID_CREDENTIALS');
+      return res.status(401).json({ error: 'ERR_INVALID_CREDENTIALS' });
+    }
+    
+    const isValid = await argon2.verify(user.passwordHash, password).catch(()=>false);
+    if (!isValid) {
+      attempts.count += 1;
+      if (attempts.count >= 5) {
+        attempts.lockUntil = Date.now() + 15 * 60 * 1000;
+        logAudit('ACCOUNT_LOCKED', email, user.role, 'TOO_MANY_ATTEMPTS');
+      }
+      failedAttempts.set(email, attempts);
+      logAudit('LOGIN_FAILED', email, user.role, 'INVALID_CREDENTIALS');
+      return res.status(401).json({ error: 'ERR_INVALID_CREDENTIALS' });
+    }
+    
+    failedAttempts.delete(email);
+    
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, district: user.district, state: user.state, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '15m' });
+    const refreshToken = jwt.sign({ id: user.id, tokenVersion: user.tokenVersion }, REFRESH_SECRET, { expiresIn: '7d' });
+    
+    logAudit('LOGIN_SUCCESS', email, user.role, 'SUCCESS');
+    
+    res.json({ token, refreshToken, user: { id: user.id, email: user.email, role: user.role, name: user.name, district: user.district, state: user.state } });
+  });
+
+  app.post('/api/auth/refresh', (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: 'Refresh token required' });
+    try {
+      const payload = jwt.verify(refreshToken, REFRESH_SECRET);
+      const user = demoUsers.find(u => u.id === (payload as any).id);
+      if (!user || user.tokenVersion !== (payload as any).tokenVersion) return res.status(401).json({ error: 'ERR_SESSION_EXPIRED' });
+      const token = jwt.sign({ id: user.id, email: user.email, role: user.role, district: user.district, state: user.state, tokenVersion: user.tokenVersion }, JWT_SECRET, { expiresIn: '15m' });
+      const newRefreshToken = jwt.sign({ id: user.id, tokenVersion: user.tokenVersion }, REFRESH_SECRET, { expiresIn: '7d' });
+      res.json({ token, refreshToken: newRefreshToken, user: { id: user.id, email: user.email, role: user.role, name: user.name, district: user.district, state: user.state } });
+    } catch (err) {
+      res.status(401).json({ error: 'ERR_SESSION_EXPIRED' });
+    }
+  });
+
+  app.post('/api/auth/logout', authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user) {
+      logAudit('LOGOUT', user.email, user.role, 'SUCCESS');
+    }
+    res.json({ message: 'Logged out successfully' });
+  });
+
+  app.post('/api/auth/forgot-password', (req, res) => {
+    const { email } = req.body;
+    logAudit('PASSWORD_RESET_REQUESTED', email, 'Unknown', 'REQUESTED');
+    
+    const now = Date.now();
+    const existing = otpSessions.get(email);
+    if (existing && (now - existing.lastRequestedAt < 60000)) {
+       logAudit('OTP_FAILED', email, 'Unknown', 'RATE_LIMITED');
+       return res.status(429).json({ error: 'ERR_OTP_RATE_LIMITED' });
+    }
+
+    const otp = "123456";
+    otpSessions.set(email, { otp, expiresAt: now + 10 * 60 * 1000, attempts: 0, lastRequestedAt: now });
+    logAudit('OTP_SENT', email, 'Unknown', 'SUCCESS');
+    res.json({ message: 'If the email exists, a reset link/OTP has been sent.', mockOtp: otp });
+  });
+
+  app.post('/api/auth/reset-password', (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    const session = otpSessions.get(email);
+    if (!session || session.otp !== otp) {
+      logAudit('OTP_FAILED', email, 'Unknown', 'INVALID_OTP');
+      return res.status(400).json({ error: 'Invalid or expired OTP' });
+    }
+    if (Date.now() > session.expiresAt) {
+      logAudit('OTP_FAILED', email, 'Unknown', 'EXPIRED_OTP');
+      return res.status(400).json({ error: 'OTP has expired' });
+    }
+    logAudit('OTP_VERIFIED', email, 'Unknown', 'SUCCESS');
+    const user = demoUsers.find(u => u.email === email);
+    if (user) {
+       user.passwordHash = newPassword;
+       logAudit('PASSWORD_RESET_SUCCESS', email, user.role, 'SUCCESS');
+    }
+    otpSessions.delete(email);
+    res.json({ message: 'Password reset successful' });
+  });
+
   // Mock API Routes for BhoomiSetu
 
-  let mockProposals = [
-    {
-      id: "PRJ-2026-001", projectName: "Delhi-Mumbai Expressway (Phase 4)", ministry: "MoRTH", category: "Highway", state: "Haryana", district: "Nuh",
-      status: "Approved", dateSubmitted: "2025-11-12", areaRequired: 450.5, areaNotified: 450.5, areaAcquired: 180.2, compensationAssessed: 675.7, compensationPaid: 360.4, familiesAffected: 900, rrSettled: 540, stage: "Notification", riskProfile: { level: "Low", score: 12, factors: ["Favorable historical state timeline", "Low objection count (12)"] }
-    },
-    {
-      id: "PRJ-2026-002", projectName: "Pune-Nashik Semi High-Speed Rail", ministry: "Ministry of Railways", category: "Rail", state: "Maharashtra", district: "Pune",
-      status: "Under Scrutiny", dateSubmitted: "2026-01-05", areaRequired: 120.0, areaNotified: 120.0, areaAcquired: 48.0, compensationAssessed: 180.0, compensationPaid: 96.0, familiesAffected: 240, rrSettled: 144, stage: "Declaration", riskProfile: { level: "High", score: 84, factors: ["High historical district delay rate (68%)", "Urban density delays", "High objection volume (450+)"] }
-    },
-    {
-      id: "PRJ-2026-003", projectName: "Chennai-Bengaluru Industrial Corridor (Node 2)", ministry: "DPIIT", category: "Industrial Corridor", state: "Tamil Nadu", district: "Kanchipuram",
-      status: "Under Scrutiny", dateSubmitted: "2025-08-20", areaRequired: 315.2, areaNotified: 315.2, areaAcquired: 126.1, compensationAssessed: 472.8, compensationPaid: 252.1, familiesAffected: 630, rrSettled: 378, stage: "Award", riskProfile: { level: "Medium", score: 45, factors: ["Approaching Sec 19 Declaration SLA", "Moderate objection count (142)"] }
-    },
-    {
-      id: "PRJ-2026-004", projectName: "Kalyan Tollway Expansion", ministry: "MoRTH", category: "Highway", state: "Maharashtra", district: "Thane",
-      status: "Approved", dateSubmitted: "2024-05-10", areaRequired: 80.0, areaNotified: 80.0, areaAcquired: 32.0, compensationAssessed: 120.0, compensationPaid: 64.0, familiesAffected: 160, rrSettled: 96, stage: "Compensation", riskProfile: { level: "Low", score: 20, factors: ["Funds disbursed", "Minimal objections"] }
-    },
-    {
-      id: "PRJ-2026-005", projectName: "Okhla Underpass", ministry: "MoUD", category: "Urban Development", state: "Delhi", district: "South Delhi",
-      status: "Delayed", dateSubmitted: "2025-10-01", areaRequired: 15.0, areaNotified: 15.0, areaAcquired: 6.0, compensationAssessed: 22.5, compensationPaid: 12.0, familiesAffected: 30, rrSettled: 18, stage: "Possession", riskProfile: { level: "High", score: 90, factors: ["Urban encroachment", "Court stay on possession"] }
-    }
-  ];
+  
+  
+// Initialize actual files for documents to demonstrate real SHA-256
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir);
+}
 
-  app.get("/api/locations", (req, res) => {
-    // Generate state/district hierarchy from projects
+// Create a real file for DOC-001
+const doc1Path = path.join(uploadsDir, 'DOC-001.pdf');
+if (!fs.existsSync(doc1Path)) {
+  fs.writeFileSync(doc1Path, 'Real file content for SEC 11 Notification Gazette.\nThis is an official document.');
+}
+// Create a real file for DOC-002
+const doc2Path = path.join(uploadsDir, 'DOC-002.pdf');
+if (!fs.existsSync(doc2Path)) {
+  fs.writeFileSync(doc2Path, 'Real file content for SEC 19 Declaration.\nThis is an official document.');
+}
+
+// We leave DOC-003 without a real file to act as a demo document
+
+function getFileHash(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const fileBuffer = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(fileBuffer).digest('hex');
+}
+
+const db = {
+    projects: [
+
+      {
+        id: "PROP-2026-0001", projectName: "Gurugram Metro Extension", ministry: "MoUD", category: "Urban Development", state: "Haryana", district: "Gurugram",
+        status: "Draft", dateSubmitted: null, areaRequired: 12.5, areaNotified: 0, areaAcquired: 0, compensationAssessed: 0, compensationPaid: 0, familiesAffected: 0, rrSettled: 0, stage: "Proposal", objectionCount: 0, historicalDelayRate: 0, riskProfile: null, implementingAgency: "DMRC", objective: "Extend metro to sector 22"
+      },
+      {
+        id: "PROP-2026-0002", projectName: "Pune Ring Road Phase 2", ministry: "MoRTH", category: "Highway", state: "Maharashtra", district: "Pune",
+        status: "Under Scrutiny", dateSubmitted: "2026-08-15", areaRequired: 150.0, areaNotified: 0, areaAcquired: 0, compensationAssessed: 0, compensationPaid: 0, familiesAffected: 0, rrSettled: 0, stage: "Proposal", objectionCount: 0, historicalDelayRate: 0, riskProfile: null, implementingAgency: "NHAI", objective: "Decongest traffic"
+      },
+      {
+        id: "PROP-2026-0003", projectName: "Noida Airport Link", ministry: "MoCA", category: "Rail", state: "Uttar Pradesh", district: "Gautam Buddha Nagar",
+        status: "Query Raised", dateSubmitted: "2026-08-20", areaRequired: 55.0, areaNotified: 0, areaAcquired: 0, compensationAssessed: 0, compensationPaid: 0, familiesAffected: 0, rrSettled: 0, stage: "Proposal", objectionCount: 0, historicalDelayRate: 0, riskProfile: null, implementingAgency: "RVNL", objective: "Airport connectivity", scrutinyQuery: "Please attach alignment map"
+      },
+      {
+        id: "PROP-2026-0004", projectName: "Karnal Solar Park", ministry: "MNRE", category: "Renewable Energy", state: "Haryana", district: "Karnal",
+        status: "Returned for Correction", dateSubmitted: "2026-09-01", areaRequired: 200.0, areaNotified: 0, areaAcquired: 0, compensationAssessed: 0, compensationPaid: 0, familiesAffected: 0, rrSettled: 0, stage: "Proposal", objectionCount: 0, historicalDelayRate: 0, riskProfile: null, implementingAgency: "SECI", objective: "Solar farm", scrutinyCorrection: "Area requirement mismatch with footprint"
+      },
+
+      {
+        id: "PRJ-2026-001", projectName: "Delhi-Mumbai Expressway (Phase 4)", ministry: "MoRTH", category: "Highway", state: "Haryana", district: "Nuh",
+        status: "Approved", dateSubmitted: "2025-11-12", areaRequired: 450.5, areaNotified: 450.5, areaAcquired: 180.2, compensationAssessed: 675.7, compensationPaid: 360.4, familiesAffected: 900, rrSettled: 540, stage: "Notification", objectionCount: 12, historicalDelayRate: 15, riskProfile: { level: "Low", score: 12, factors: ["Favorable historical state timeline", "Low objection count (12)"] }
+      },
+      {
+        id: "PRJ-2026-002", projectName: "Pune-Nashik Semi High-Speed Rail", ministry: "Ministry of Railways", category: "Rail", state: "Maharashtra", district: "Pune",
+        status: "Under Scrutiny", dateSubmitted: "2026-01-05", areaRequired: 120.0, areaNotified: 120.0, areaAcquired: 48.0, compensationAssessed: 180.0, compensationPaid: 96.0, familiesAffected: 240, rrSettled: 144, stage: "Declaration", objectionCount: 45, historicalDelayRate: 68, riskProfile: { level: "High", score: 84, factors: ["High historical district delay rate (68%)", "Urban density delays", "High objection volume (450+)"] }
+      },
+      {
+        id: "PRJ-2026-003", projectName: "Chennai-Bengaluru Industrial Corridor (Node 2)", ministry: "DPIIT", category: "Industrial Corridor", state: "Tamil Nadu", district: "Kanchipuram",
+        status: "Under Scrutiny", dateSubmitted: "2025-08-20", areaRequired: 315.2, areaNotified: 315.2, areaAcquired: 126.1, compensationAssessed: 472.8, compensationPaid: 252.1, familiesAffected: 630, rrSettled: 378, stage: "Award", objectionCount: 22, historicalDelayRate: 20, riskProfile: { level: "Medium", score: 45, factors: ["Approaching Sec 19 Declaration SLA", "Moderate objection count (142)"] }
+      },
+      {
+        id: "PRJ-2026-004", projectName: "Kalyan Tollway Expansion", ministry: "MoRTH", category: "Highway", state: "Maharashtra", district: "Thane",
+        status: "Approved", dateSubmitted: "2024-05-10", areaRequired: 80.0, areaNotified: 80.0, areaAcquired: 32.0, compensationAssessed: 120.0, compensationPaid: 64.0, familiesAffected: 160, rrSettled: 96, stage: "Compensation", objectionCount: 5, historicalDelayRate: 10, riskProfile: { level: "Low", score: 20, factors: ["Funds disbursed", "Minimal objections"] }
+      },
+      {
+        id: "PRJ-2026-005", projectName: "Okhla Underpass", ministry: "MoUD", category: "Urban Development", state: "Delhi", district: "South Delhi",
+        status: "Delayed", dateSubmitted: "2025-10-01", areaRequired: 15.0, areaNotified: 15.0, areaAcquired: 6.0, compensationAssessed: 22.5, compensationPaid: 12.0, familiesAffected: 30, rrSettled: 18, stage: "Possession", objectionCount: 8, historicalDelayRate: 35, riskProfile: { level: "High", score: 90, factors: ["Urban encroachment", "Court stay on possession"] }
+      }
+    ],
+    parcels: [
+      { parcelId: "PAR-001", projectId: "PRJ-2026-001", ulpin: "06122344556677", stage: "Notification", state: "Haryana", district: "Nuh", village: "Khedki", area: 1.2, surveyNumber: "45/2", landType: "Agricultural", owner: "Private", risk: "Low", geometry: [[[77.017, 28.124], [77.019, 28.124], [77.019, 28.126], [77.017, 28.126], [77.017, 28.124]]] },
+      { parcelId: "PAR-002", projectId: "PRJ-2026-001", ulpin: "06122344556678", stage: "Award", state: "Haryana", district: "Nuh", village: "Khedki", area: 2.1, surveyNumber: "46/1", landType: "Commercial", owner: "Private", risk: "Medium", geometry: [[[77.020, 28.120], [77.022, 28.120], [77.022, 28.122], [77.020, 28.122], [77.020, 28.120]]] },
+      { parcelId: "PAR-003", projectId: "PRJ-2026-002", ulpin: "27122344556677", stage: "Declaration", state: "Maharashtra", district: "Pune", village: "Shivajinagar", area: 0.5, surveyNumber: "12/A", landType: "Residential", owner: "Private", risk: "High", geometry: [[[73.856, 18.520], [73.858, 18.520], [73.858, 18.522], [73.856, 18.522], [73.856, 18.520]]] }
+    ],
+    compensation: [
+      {
+        id: "COMP-001",
+        referenceId: "REF-2026-001",
+        projectId: "PRJ-2026-001",
+        parcelId: "PAR-001",
+        ulpin: "06122344556677",
+        beneficiaryId: "BEN-001",
+        beneficiaryName: "Rajesh Kumar",
+        state: "Haryana",
+        district: "Nuh",
+        village: "Khedki",
+        area: 1.2,
+        marketValue: 500000,
+        solatium: 500000,
+        additionalComponents: [],
+        totalAssessed: 1000000,
+        approvedAmount: 1000000,
+        disbursedAmount: 1000000,
+        balanceAmount: 0,
+        assessmentStatus: "APPROVED",
+        paymentStatus: "PAID",
+        paymentHistory: [
+            { id: "PAY-001", reference: "PFMS-DEMO-2026-0001", amount: 1000000, date: "2026-08-12", status: "PAID", initiatedBy: "LAO Nuh" }
+        ],
+        awardId: "AWD-101",
+        paymentReference: "PFMS-DEMO-2026-0001",
+        paymentDate: "2026-08-12",
+        createdBy: "System",
+        createdAt: "2026-08-01",
+        updatedAt: "2026-08-12"
+      },
+      {
+        id: "COMP-002",
+        referenceId: "REF-2026-002",
+        projectId: "PRJ-2026-001",
+        parcelId: "PAR-002",
+        ulpin: "06122344556678",
+        beneficiaryId: "BEN-002",
+        beneficiaryName: "Sunita Devi",
+        state: "Haryana",
+        district: "Nuh",
+        village: "Khedki",
+        area: 2.1,
+        marketValue: 400000,
+        solatium: 400000,
+        additionalComponents: [],
+        totalAssessed: 800000,
+        approvedAmount: 0,
+        disbursedAmount: 0,
+        balanceAmount: 800000,
+        assessmentStatus: "DRAFT",
+        paymentStatus: "PENDING",
+        paymentHistory: [],
+        createdBy: "System",
+        createdAt: "2026-08-15",
+        updatedAt: "2026-08-15"
+      },
+      {
+        id: "COMP-003",
+        referenceId: "REF-2026-003",
+        projectId: "PRJ-2026-002",
+        parcelId: "PAR-003",
+        ulpin: "27122344556677",
+        beneficiaryId: "BEN-003",
+        beneficiaryName: "Amit Patel",
+        state: "Maharashtra",
+        district: "Pune",
+        village: "Shivajinagar",
+        area: 0.5,
+        marketValue: 600000,
+        solatium: 600000,
+        additionalComponents: [],
+        totalAssessed: 1200000,
+        approvedAmount: 1200000,
+        disbursedAmount: 600000,
+        balanceAmount: 600000,
+        assessmentStatus: "APPROVED",
+        paymentStatus: "PARTIALLY_PAID",
+        paymentHistory: [
+             { id: "PAY-002", reference: "PFMS-DEMO-2026-0002", amount: 600000, date: "2026-07-30", status: "PAID", initiatedBy: "LAO Pune" }
+        ],
+        awardId: "AWD-102",
+        createdBy: "System",
+        createdAt: "2026-07-01",
+        updatedAt: "2026-07-30"
+      },
+      {
+        id: "COMP-004",
+        referenceId: "REF-2026-004",
+        projectId: "PRJ-2026-002",
+        parcelId: "PAR-004",
+        ulpin: "27122344556688",
+        beneficiaryId: "BEN-004",
+        beneficiaryName: "Neha Sharma",
+        state: "Maharashtra",
+        district: "Pune",
+        village: "Shivajinagar",
+        area: 1.0,
+        marketValue: 750000,
+        solatium: 750000,
+        additionalComponents: [{ code: "TREES", label: "Trees", amount: 50000 }],
+        totalAssessed: 1550000,
+        approvedAmount: 1550000,
+        disbursedAmount: 1550000,
+        balanceAmount: 0,
+        assessmentStatus: "APPROVED",
+        paymentStatus: "PAID",
+        paymentHistory: [
+             { id: "PAY-003", reference: "PFMS-DEMO-2026-0003", amount: 1550000, date: "2026-08-01", status: "PAID", initiatedBy: "LAO Pune" }
+        ],
+        createdBy: "System",
+        createdAt: "2026-07-10",
+        updatedAt: "2026-08-01"
+      },
+      {
+        id: "COMP-005",
+        referenceId: "REF-2026-005",
+        projectId: "PRJ-2026-001",
+        parcelId: "PAR-005",
+        ulpin: "06122344556699",
+        beneficiaryId: "BEN-005",
+        beneficiaryName: "Ramesh Singh",
+        state: "Haryana",
+        district: "Nuh",
+        village: "Khedki",
+        area: 0.8,
+        marketValue: 200000,
+        solatium: 200000,
+        additionalComponents: [],
+        totalAssessed: 400000,
+        approvedAmount: 0,
+        disbursedAmount: 0,
+        balanceAmount: 400000,
+        assessmentStatus: "SUBMITTED",
+        paymentStatus: "PENDING",
+        paymentHistory: [],
+        createdBy: "System",
+        createdAt: "2026-08-20",
+        updatedAt: "2026-08-20"
+      }
+    ],
+    rnr: [
+      { 
+        id: "RNR-001", referenceId: "RNR-REF-1001", projectId: "PRJ-2026-001", parcelId: "PAR-001", ulpin: "06122344556677", familyId: "FAM-001", 
+        familyHead: "Rajesh Kumar", memberCount: 4, state: "Haryana", district: "Nuh", village: "Nuh", category: "Displaced",
+        eligibilityStatus: "ELIGIBLE", entitlementStatus: "ASSESSED",
+        housingStatus: "PROVIDED", housingEntitlement: true, housingAllotment: "HSG-A-01",
+        landEntitlement: false, landStatus: "NOT_APPLICABLE",
+        livelihoodStatus: "COMPLETED", livelihoodEntitlement: true, livelihoodAssistance: 50000, trainingStatus: "COMPLETED",
+        assistanceAssessed: 150000, assistancePaid: 150000, assistanceBalance: 0,
+        relocationRequired: true, relocationStatus: "COMPLETED", relocationDate: "2026-01-15",
+        verificationStatus: "VERIFIED", verifiedBy: "field_officer", verifiedAt: "2025-11-01",
+        approvalStatus: "SETTLED", approvedBy: "lao_nuh", approvedAt: "2026-02-01", remarks: "All entitlements provided.",
+        createdBy: "system", createdAt: "2025-10-01", updatedAt: "2026-02-01"
+      },
+      { 
+        id: "RNR-002", referenceId: "RNR-REF-1002", projectId: "PRJ-2026-001", parcelId: "PAR-001", ulpin: "06122344556677", familyId: "FAM-002", 
+        familyHead: "Mukesh Kumar", memberCount: 2, state: "Haryana", district: "Nuh", village: "Nuh", category: "Affected Not Displaced",
+        eligibilityStatus: "NOT_ASSESSED", entitlementStatus: "PENDING",
+        housingStatus: "PENDING", housingEntitlement: false,
+        landEntitlement: false, landStatus: "PENDING",
+        livelihoodStatus: "PENDING", livelihoodEntitlement: false, livelihoodAssistance: 0, trainingStatus: "PENDING",
+        assistanceAssessed: 0, assistancePaid: 0, assistanceBalance: 0,
+        relocationRequired: false, relocationStatus: "NOT_REQUIRED",
+        verificationStatus: "PENDING",
+        approvalStatus: "DRAFT", createdBy: "system", createdAt: "2026-08-01", updatedAt: "2026-08-01"
+      },
+      { 
+        id: "RNR-003", referenceId: "RNR-REF-1003", projectId: "PRJ-2026-001", parcelId: "PAR-002", ulpin: "06122344556678", familyId: "FAM-003", 
+        familyHead: "Sunita Devi", memberCount: 5, state: "Haryana", district: "Nuh", village: "Nuh", category: "Displaced",
+        eligibilityStatus: "UNDER_REVIEW", entitlementStatus: "PENDING",
+        housingStatus: "PENDING", housingEntitlement: false,
+        landEntitlement: false, landStatus: "PENDING",
+        livelihoodStatus: "PENDING", livelihoodEntitlement: false, livelihoodAssistance: 0, trainingStatus: "PENDING",
+        assistanceAssessed: 0, assistancePaid: 0, assistanceBalance: 0,
+        relocationRequired: true, relocationStatus: "PLANNED",
+        verificationStatus: "VERIFIED", verifiedBy: "field_officer", verifiedAt: "2026-08-10",
+        approvalStatus: "UNDER_REVIEW", createdBy: "system", createdAt: "2026-07-15", updatedAt: "2026-08-10"
+      },
+      { 
+        id: "RNR-004", referenceId: "RNR-REF-1004", projectId: "PRJ-2026-002", parcelId: "PAR-003", ulpin: "27122344556677", familyId: "FAM-004", 
+        familyHead: "Amit Patel", memberCount: 3, state: "Maharashtra", district: "Pune", village: "Khed", category: "Displaced",
+        eligibilityStatus: "ELIGIBLE", entitlementStatus: "ASSESSED",
+        housingStatus: "APPROVED", housingEntitlement: true,
+        landEntitlement: true, landStatus: "ALLOCATED", landAllotment: "LND-A-01",
+        livelihoodStatus: "IN_PROGRESS", livelihoodEntitlement: true, livelihoodAssistance: 25000, trainingStatus: "IN_PROGRESS",
+        assistanceAssessed: 100000, assistancePaid: 50000, assistanceBalance: 50000,
+        relocationRequired: true, relocationStatus: "IN_PROGRESS",
+        verificationStatus: "VERIFIED", verifiedBy: "field_officer_mh", verifiedAt: "2026-06-01",
+        approvalStatus: "IMPLEMENTATION_IN_PROGRESS", approvedBy: "lao_pune", approvedAt: "2026-06-15",
+        createdBy: "system", createdAt: "2026-05-01", updatedAt: "2026-08-01"
+      },
+      { 
+        id: "RNR-005", referenceId: "RNR-REF-1005", projectId: "PRJ-2026-002", parcelId: "PAR-005", ulpin: "27122344556678", familyId: "FAM-005", 
+        familyHead: "Suresh Patel", memberCount: 4, state: "Maharashtra", district: "Pune", village: "Khed", category: "Displaced",
+        eligibilityStatus: "INELIGIBLE", entitlementStatus: "PENDING",
+        housingStatus: "PENDING", housingEntitlement: false,
+        landEntitlement: false, landStatus: "PENDING",
+        livelihoodStatus: "PENDING", livelihoodEntitlement: false, livelihoodAssistance: 0, trainingStatus: "PENDING",
+        assistanceAssessed: 0, assistancePaid: 0, assistanceBalance: 0,
+        relocationRequired: false, relocationStatus: "NOT_REQUIRED",
+        verificationStatus: "RETURNED", verifiedBy: "field_officer_mh", verifiedAt: "2026-08-05",
+        approvalStatus: "RETURNED", remarks: "Need more proof of residence.",
+        createdBy: "system", createdAt: "2026-07-20", updatedAt: "2026-08-05"
+      }
+    ],
+    documents: [
+      { id: "DOC-001", title: "Sec 11 Notification Gazette", fileName: "DOC-001.pdf", type: "NOTIFICATION", version: "1.0", projectId: "PRJ-2026-001", parcelId: "PAR-001", ulpin: "06122344556677", uploadedBy: "lao.district@bhoomisetu.gov.in", uploadedByRole: "District LAO", uploadedAt: "2025-12-01T10:00:00Z", fileSize: "123 KB", mimeType: "application/pdf", storagePath: path.join(process.cwd(), "uploads", "DOC-001.pdf"), checksum: "6d205290340e072bfdd0d26dd6dc1bfd5b046ef5d3eb9c49cfd942fe3b1aa13e", checksumAlgorithm: "SHA-256", integrityStatus: "VERIFIED", signatureStatus: "SIGNED", status: "VERIFIED" },
+      { id: "DOC-002", title: "Sec 19 Declaration", fileName: "DOC-002.pdf", type: "DECLARATION", version: "1.0", projectId: "PRJ-2026-001", parcelId: "PAR-002", ulpin: "06122344556678", uploadedBy: "sno@bhoomisetu.gov.in", uploadedByRole: "State Nodal Officer", uploadedAt: "2026-01-20T11:00:00Z", fileSize: "150 KB", mimeType: "application/pdf", storagePath: path.join(process.cwd(), "uploads", "DOC-002.pdf"), checksum: "9f05e703a880884d583bdcafee85257cd2a447bd88fc49ad798edf63eef00b1d", checksumAlgorithm: "SHA-256", integrityStatus: "VERIFIED", signatureStatus: "PENDING_SIGNATURE", status: "PENDING_REVIEW" },
+      { id: "DOC-003", title: "SIA Report", fileName: "DOC-003.pdf", type: "REPORT", version: "1.0", projectId: "PRJ-2026-002", parcelId: "PAR-003", ulpin: "27122344556677", uploadedBy: "admin@bhoomisetu.gov.in", uploadedByRole: "Super Admin", uploadedAt: "2026-02-15T09:00:00Z", fileSize: "2 MB", mimeType: "application/pdf", storagePath: path.join(process.cwd(), "uploads", "DOC-003.pdf"), checksum: "413429b6f86a7d10d08c2fb7e8de78a562b45a093cedc2cb0b47021837bb247b", checksumAlgorithm: "SHA-256", integrityStatus: "VERIFIED", signatureStatus: "NOT_SIGNED", status: "VERIFIED" },
+      { id: "DOC-004", title: "Sec 23 Award Document", fileName: "DOC-004.pdf", type: "AWARD", version: "1.0", projectId: "PRJ-2026-002", parcelId: "PAR-003", ulpin: "27122344556677", uploadedBy: "lao.district@bhoomisetu.gov.in", uploadedByRole: "District LAO", uploadedAt: "2026-05-15T14:00:00Z", fileSize: "1.1 MB", mimeType: "application/pdf", storagePath: path.join(process.cwd(), "uploads", "DOC-004.pdf"), checksum: "68064b50ac642f35a289a8be66bab32ab30aed1dcea0f9ec4b7b45eba4412cc8", checksumAlgorithm: "SHA-256", integrityStatus: "VERIFIED", signatureStatus: "SIGNED", status: "VERIFIED" },
+      { id: "DOC-005", title: "R&R Entitlement Verification", fileName: "DOC-005.pdf", type: "R&R", version: "1.0", projectId: "PRJ-2026-001", rnrId: "RNR-001", uploadedBy: "sno@bhoomisetu.gov.in", uploadedByRole: "State Nodal Officer", uploadedAt: "2026-06-01T10:30:00Z", fileSize: "800 KB", mimeType: "application/pdf", storagePath: path.join(process.cwd(), "uploads", "DOC-005.pdf"), checksum: "b0d4273c041e973f6371002016c54b28c5217f8934d3060769fd7341cdff357a", checksumAlgorithm: "SHA-256", integrityStatus: "VERIFIED", signatureStatus: "NOT_SIGNED", status: "VERIFIED" }
+    ],
+    documentVersions: [],
+    awards: [
+      {
+        id: "AWD-101",
+        referenceId: "AWD/2026/01",
+        projectId: "PRJ-2026-001",
+        projectName: "NH-44 Expansion",
+        state: "Haryana",
+        district: "Nuh",
+        issueDate: "2026-05-15",
+        status: "APPROVED",
+        beneficiaryCount: 1,
+        totalAmount: 2100000,
+        awardItems: [
+          {
+            id: "AWD-ITEM-101-1",
+            awardId: "AWD-101",
+            projectId: "PRJ-2026-001",
+            parcelId: "PAR-001",
+            ulpin: "06122344556677",
+            beneficiaryId: "BEN-001",
+            beneficiaryName: "Rajesh Kumar",
+            compensationId: "COMP-001",
+            rnrId: "RNR-001",
+            eligibleAmount: 2100000,
+            awardAmount: 2100000,
+            status: "APPROVED",
+          }
+        ],
+        createdBy: "lao.district@bhoomisetu.gov.in",
+        createdAt: "2026-05-10T10:00:00Z",
+        updatedAt: "2026-05-15T12:00:00Z",
+        verifiedBy: "sno@bhoomisetu.gov.in",
+        verifiedAt: "2026-05-12T10:00:00Z",
+        approvedBy: "admin@bhoomisetu.gov.in",
+        approvedAt: "2026-05-15T10:00:00Z"
+      },
+      {
+        id: "AWD-102",
+        referenceId: "AWD/2026/42",
+        projectId: "PRJ-2026-002",
+        projectName: "Pune Metro Line 3",
+        state: "Maharashtra",
+        district: "Pune",
+        status: "DRAFT",
+        beneficiaryCount: 1,
+        totalAmount: 4200000,
+        awardItems: [
+          {
+            id: "AWD-ITEM-102-1",
+            awardId: "AWD-102",
+            projectId: "PRJ-2026-002",
+            parcelId: "PAR-003",
+            ulpin: "27122344556677",
+            beneficiaryId: "BEN-003",
+            beneficiaryName: "Amit Patel",
+            compensationId: "COMP-003",
+            eligibleAmount: 4200000,
+            awardAmount: 4200000,
+            status: "DRAFT",
+          }
+        ],
+        createdBy: "lao.district@bhoomisetu.gov.in",
+        createdAt: "2026-06-20T10:00:00Z",
+        updatedAt: "2026-06-22T10:00:00Z",
+      },
+      {
+        id: "AWD-103",
+        referenceId: "AWD/2026/05",
+        projectId: "PRJ-2026-001",
+        projectName: "NH-44 Expansion",
+        state: "Haryana",
+        district: "Nuh",
+        status: "SUBMITTED",
+        beneficiaryCount: 1,
+        totalAmount: 1800000,
+        awardItems: [
+          {
+            id: "AWD-ITEM-103-1",
+            awardId: "AWD-103",
+            projectId: "PRJ-2026-001",
+            parcelId: "PAR-002",
+            ulpin: "06122344556678",
+            beneficiaryId: "BEN-002",
+            beneficiaryName: "Suresh Sharma",
+            compensationId: "COMP-002",
+            eligibleAmount: 1800000,
+            awardAmount: 1800000,
+            status: "SUBMITTED"
+          }
+        ],
+        createdBy: "lao.district@bhoomisetu.gov.in",
+        createdAt: "2026-09-01T10:00:00Z",
+        updatedAt: "2026-09-02T10:00:00Z"
+      },
+      {
+        id: "AWD-104",
+        referenceId: "AWD/2026/06",
+        projectId: "PRJ-2026-001",
+        projectName: "NH-44 Expansion",
+        state: "Haryana",
+        district: "Nuh",
+        status: "ISSUED",
+        issueDate: "2026-09-10",
+        beneficiaryCount: 1,
+        totalAmount: 1500000,
+        awardItems: [
+          {
+            id: "AWD-ITEM-104-1",
+            awardId: "AWD-104",
+            projectId: "PRJ-2026-001",
+            parcelId: "PAR-001",
+            ulpin: "06122344556677",
+            beneficiaryId: "BEN-004",
+            beneficiaryName: "Priya Singh",
+            eligibleAmount: 1500000,
+            awardAmount: 1500000,
+            status: "ISSUED"
+          }
+        ],
+        createdBy: "lao.district@bhoomisetu.gov.in",
+        createdAt: "2026-08-01T10:00:00Z",
+        updatedAt: "2026-08-10T10:00:00Z",
+        verifiedBy: "sno@bhoomisetu.gov.in",
+        verifiedAt: "2026-08-05T10:00:00Z",
+        approvedBy: "admin@bhoomisetu.gov.in",
+        approvedAt: "2026-08-08T10:00:00Z",
+        issuedBy: "lao.district@bhoomisetu.gov.in",
+        issuedAt: "2026-08-10T10:00:00Z",
+        documentId: "DOC-004"
+      },
+      {
+        id: "AWD-105",
+        referenceId: "AWD/2026/07",
+        projectId: "PRJ-2026-002",
+        projectName: "Pune Metro Line 3",
+        state: "Maharashtra",
+        district: "Pune",
+        status: "REJECTED",
+        beneficiaryCount: 1,
+        totalAmount: 3000000,
+        awardItems: [
+          {
+            id: "AWD-ITEM-105-1",
+            awardId: "AWD-105",
+            projectId: "PRJ-2026-002",
+            parcelId: "PAR-003",
+            ulpin: "27122344556677",
+            beneficiaryId: "BEN-005",
+            beneficiaryName: "Rahul Desai",
+            eligibleAmount: 3000000,
+            awardAmount: 3000000,
+            status: "REJECTED"
+          }
+        ],
+        createdBy: "lao.district@bhoomisetu.gov.in",
+        createdAt: "2026-09-05T10:00:00Z",
+        updatedAt: "2026-09-08T10:00:00Z",
+        verifiedBy: "sno@bhoomisetu.gov.in",
+        verifiedAt: "2026-09-06T10:00:00Z",
+        rejectedBy: "admin@bhoomisetu.gov.in",
+        rejectedAt: "2026-09-08T10:00:00Z",
+        rejectionReason: "Valuation error in assessment"
+      }
+    ],
+    reports: [
+      { id: "REP-991", projectId: "PRJ-2026-001", title: "Q3 Acquisition Progress", type: "Progress", generatedDate: "2026-09-01", generatedBy: "System", format: "PDF", size: "2.4 MB" },
+      { id: "REP-992", projectId: "PRJ-2026-002", title: "DBT Disbursement Delay", type: "Financial", generatedDate: "2026-08-28", generatedBy: "Admin", format: "XLSX", size: "1.1 MB" }
+    ],
+    grievances: [
+      { id: "GRV-001", projectId: "PRJ-2026-002", parcelId: "PAR-003", trackingId: "G-2026-MH-4421", category: "Compensation", description: "Market value assessed is low", submittedBy: "Amit Patel", submittedDate: "2026-09-02", status: "Open", assignedTo: "District LAO", priority: "High" },
+      { id: "GRV-002", projectId: "PRJ-2026-001", parcelId: "PAR-001", trackingId: "G-2026-HR-1132", category: "R&R", description: "Not included in displaced list", submittedBy: "Rajesh Kumar", submittedDate: "2026-08-15", status: "In Progress", assignedTo: "SIA Authority", priority: "Medium" }
+    ],
+    auditLogs: [],
+    auditEvents: [],
+    alerts: [
+      { id: "ALT-001", projectId: "PRJ-2026-002", title: "Section 24(2) Lapse Risk", msg: "Award is 4.8 years old with pending possession.", time: "2 mins ago", loc: "Pune", read: false, severity: "high" },
+      { id: "ALT-002", projectId: "PRJ-2026-001", title: "Declaration Deadline", msg: "Section 19 Declaration pending for 14 parcels.", time: "1 hour ago", loc: "Nuh", read: false, severity: "medium" }
+    ]
+  };
+
+  app.get("/api/locations", authenticateToken, (req, res) => {
     const states = {};
     states["All States"] = ["All Districts"];
-    mockProposals.forEach(p => {
+    (db as any).projects.forEach(p => {
       if (!states[p.state]) states[p.state] = ["All Districts"];
       if (!states[p.state].includes(p.district)) states[p.state].push(p.district);
     });
-    // Add some fallbacks just in case
     if (!states["Delhi"]) states["Delhi"] = ["All Districts", "New Delhi", "South Delhi"];
     if (!states["Haryana"]) states["Haryana"] = ["All Districts", "Nuh", "Gurugram"];
     res.json(states);
   });
 
+  function getUserAssignedProjectIds(userObj) { return userObj?.assignedProjects || []; }
+  function getUserAssignedParcelIds(userObj) { return userObj?.assignedParcels || []; }
+
   
-  function filterProjects(query) {
+function authorizeProposalAccess(user, proposal) {
+  if (user.role === "Super Admin" || user.role === "Central Ministry Officer") return true;
+  if (user.role === "State Nodal Officer") return proposal.state === user.state;
+  if (user.role === "District LAO") return proposal.state === user.state && proposal.district === user.district;
+  if (user.role === "Project Implementing Agency") {
+    const uObj = demoUsers.find(u => u.id === user.id);
+    return uObj && uObj.assignedProjects && uObj.assignedProjects.includes(proposal.id);
+  }
+  return false;
+}
+
+const VALID_STATES = ["Uttar Pradesh", "Haryana", "Maharashtra", "Karnataka"];
+const VALID_DISTRICTS = {
+  "Uttar Pradesh": ["Gautam Buddha Nagar", "Lucknow", "Kanpur"],
+  "Haryana": ["Gurugram", "Nuh", "Karnal", "Panipat"],
+  "Maharashtra": ["Pune", "Mumbai", "Thane"],
+  "Karnataka": ["Bengaluru", "Mysuru"]
+};
+const VALID_MINISTRIES = ["MoRTH", "Ministry of Railways", "MoHUA", "MNRE", "MoUD", "MoCA"];
+const VALID_CATEGORIES = ["Highway", "Rail", "Irrigation", "Industrial Corridor", "Urban Development", "Renewable Energy"];
+
+
+function createNotification(user, type, title, message, entityId) {
+    (db as any).notifications = (db as any).notifications || [];
+    (db as any).notifications.push({
+        id: "NOTIF-" + Date.now() + Math.floor(Math.random() * 1000),
+        recipientId: user.id, // For demo, assuming target is the current user or related role
+        type,
+        title,
+        message,
+        entityId,
+        createdAt: new Date().toISOString(),
+        read: false
+    });
+}
+
+function filterProjects(query, user) {
     const { state, district, project, stage, category, risk } = query;
-    let projs = mockProposals;
+    let projs = (db as any).projects;
+    
+    if (user) {
+      const uObj = demoUsers.find(u => u.id === user.id);
+      if (user.role === 'Project Implementing Agency') {
+        const allowedProjects = getUserAssignedProjectIds(uObj);
+        projs = projs.filter(p => allowedProjects.includes(p.id));
+      } else if (user.role === 'Field Surveyor') {
+        projs = projs.filter(p => p.district === user.district);
+      } else if (user.role === 'Affected Citizen') {
+        projs = []; // They don't see generic projects
+      } else {
+        if (user.state !== 'All' && user.state !== 'All States') {
+           projs = projs.filter(p => p.state === user.state);
+        }
+        if (user.district !== 'All' && user.district !== 'All Districts') {
+           projs = projs.filter(p => p.district === user.district);
+        }
+      }
+    }
+
     if (state && state !== "All States") projs = projs.filter(p => p.state === state);
     if (district && district !== "All Districts") projs = projs.filter(p => p.district === district);
     if (project && project !== "All Projects") {
-       // project could be the ID or name
        projs = projs.filter(p => p.id === project || p.projectName === project);
     }
     if (stage && stage !== "All Stages") projs = projs.filter(p => p.stage === stage);
     if (category && category !== "All Categories") projs = projs.filter(p => p.category === category);
     if (risk && risk !== "All Risks") projs = projs.filter(p => p.riskProfile.level === risk);
+    
     return projs;
   }
 
+  app.get("/api/profile", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    const u = demoUsers.find(d => d.id === user.id);
+    res.json({ name: u?.name || "Unknown", email: user.email, role: user.role, district: user.district, state: user.state, notifEmail: true, notifSms: true });
+  });
+
+  app.post("/api/profile", authenticateToken, (req, res) => {
+    res.json({ message: "Profile updated successfully" });
+  });
+
+  app.post("/api/password", authenticateToken, (req, res) => {
+    res.json({ message: "Password updated successfully" });
+  });
+
+  app.get("/api/notifications", authenticateToken, (req, res) => {
+    res.json((db as any).alerts);
+  });
+
+  app.get("/api/projects", authenticateToken, (req, res) => {
+    res.json(filterProjects(req.query, (req as any).user));
+  });
+
+  app.get("/api/proposals", authenticateToken, (req, res) => {
+    res.json(filterProjects(req.query, (req as any).user));
+  });
+
+
   
-  let userProfile = { name: "Ramesh Kumar", email: "ramesh.k@bhoomisetu.gov.in", role: "District LAO", district: "New Delhi", notifEmail: true, notifSms: true };
-  let currentPasswordHash = "dummyhash";
-
-  app.get("/api/profile", (req, res) => {
-    res.json(userProfile);
-  });
-
-  app.post("/api/profile", (req, res) => {
-    const { name, email, notifEmail, notifSms } = req.body;
-    if (name) userProfile.name = name;
-    if (email) userProfile.email = email;
-    if (notifEmail !== undefined) userProfile.notifEmail = notifEmail;
-    if (notifSms !== undefined) userProfile.notifSms = notifSms;
-    res.json(userProfile);
-  });
-
-  app.post("/api/password", (req, res) => {
-    const { current, newPass } = req.body;
-    // In a real app, verify hash. Here we just mock verify.
-    if (!current || !newPass) return res.status(400).json({ error: "Missing fields" });
-    if (current === newPass) return res.status(400).json({ error: "New password must be different" });
-    if (newPass.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
-    // Mocking that any current password except "wrong" works for demo purposes, since we don't have login session yet
-    if (current === "wrong") return res.status(401).json({ error: "Incorrect current password" });
+  app.post("/api/proposals", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
     
-    currentPasswordHash = newPass; // mock update
-    res.json({ success: true });
-  });
+    // Validation
+    const { projectName, category, ministry, state, district, areaRequired, implementingAgency, objective, action, footprint } = req.body;
+    if (!projectName || projectName.trim().length === 0) return res.status(400).json({ error: "Project Name required", code: "ERR_INVALID_NAME" });
+    if (!VALID_MINISTRIES.includes(ministry)) return res.status(400).json({ error: "Invalid ministry", code: "ERR_INVALID_MINISTRY" });
+    if (!VALID_CATEGORIES.includes(category)) return res.status(400).json({ error: "Invalid category", code: "ERR_INVALID_CATEGORY" });
+    if (!VALID_STATES.includes(state)) return res.status(400).json({ error: "Invalid state", code: "ERR_INVALID_STATE" });
+    if (!VALID_DISTRICTS[state] || !VALID_DISTRICTS[state].includes(district)) return res.status(400).json({ error: "Invalid district for the selected state", code: "ERR_INVALID_DISTRICT" });
+    if (areaRequired <= 0) return res.status(400).json({ error: "Invalid area" });
 
-  
-  let mockNotifications = [
-    { id: 1, title: "Section 24(2) Lapse Risk", msg: "Award is 4.8 years old with pending possession for CBIC Node 2.", time: "2 mins ago", loc: "Kanchipuram", read: false, severity: "high" },
-    { id: 2, title: "Declaration Deadline", msg: "Section 19 Declaration pending for 14 parcels.", time: "1 hour ago", loc: "Rohtak", read: false, severity: "medium" },
-    { id: 3, title: "Fund Disbursement", msg: "₹14.2 Cr disbursed to 45 beneficiaries.", time: "3 hours ago", loc: "Pune", read: true, severity: "low" }
-  ];
+    // Validate scope for creation
+    if (user.role === "State Nodal Officer" && user.state !== state) return res.status(403).json({ error: "Cannot create proposal outside your jurisdiction" });
+    if (user.role === "District LAO" && (user.state !== state || user.district !== district)) return res.status(403).json({ error: "Cannot create proposal outside your jurisdiction" });
 
-  app.get("/api/notifications", (req, res) => {
-    res.json(mockNotifications);
-  });
 
-  app.post("/api/notifications/read", (req, res) => {
-    mockNotifications = mockNotifications.map(n => ({...n, read: true}));
-    res.json(mockNotifications);
-  });
-
-  app.get("/api/projects", (req, res) => {
-    const projs = filterProjects(req.query);
-    res.json(projs.map(p => ({ id: p.id, name: p.projectName })));
-  });
-
-  app.get("/api/proposals", (req, res) => {
-    res.json(filterProjects(req.query));
-  });
-
-  app.post("/api/proposals", (req, res) => {
+    const newId = "PROP-2026-" + String((db as any).projects.length + 1).padStart(4, '0');
+    
+    const status = action === "submit" ? "Submitted" : "Draft";
+    
     const newProposal = {
-      ...req.body,
-      id: `PRJ-2026-00${mockProposals.length + 1}`,
-      status: "Submitted",
-      dateSubmitted: new Date().toISOString().split('T')[0],
-      riskProfile: {
-        level: "Medium",
-        score: 50,
-        factors: ["Insufficient historical data for accurate prediction", "Standard SLA applies"]
-      }
+      id: newId,
+      projectName: projectName.trim(),
+      ministry,
+      category,
+      state,
+      district: district || "Unspecified",
+      implementingAgency: implementingAgency || "",
+      objective: objective || "",
+      status,
+      dateSubmitted: status === "Submitted" ? new Date().toISOString().split('T')[0] : null,
+      areaRequired: parseFloat(areaRequired),
+      areaNotified: 0,
+      areaAcquired: 0,
+      compensationAssessed: 0,
+      compensationPaid: 0,
+      familiesAffected: 0,
+      rrSettled: 0,
+      stage: status === "Submitted" ? "Scrutiny" : "Draft",
+      objectionCount: 0,
+      historicalDelayRate: 0,
+      riskProfile: null,
+      footprint: req.body.footprint || null
     };
-    mockProposals.unshift(newProposal);
-    res.json(newProposal);
+
+    (db as any).projects.push(newProposal);
+    
+    const auditEvent = {
+       id: "AUD-" + Date.now(),
+       projectId: newId,
+       action: status === "Submitted" ? "PROPOSAL_SUBMITTED" : "PROPOSAL_DRAFT_SAVED",
+       stage: newProposal.stage,
+       remarks: `Proposal created as ${status}`,
+       executedBy: user.username,
+       timestamp: new Date().toISOString()
+    };
+    (db as any).auditEvents = (db as any).auditEvents || [];
+    (db as any).auditEvents.push(auditEvent);
+
+    // If PIA, assign to them so they can see it
+    if (user.role === "Project Implementing Agency") {
+       const uObj = demoUsers.find(u => u.id === user.id);
+       if (uObj) {
+          uObj.assignedProjects = uObj.assignedProjects || [];
+          uObj.assignedProjects.push(newId);
+       }
+    }
+
+    res.json({ success: true, proposal: newProposal, auditEvent });
   });
 
-  app.get("/api/search", (req, res) => {
-    const q = req.query.q ? String(req.query.q).toLowerCase() : "";
-    if (!q) return res.json([]);
+  
+  app.put("/api/proposals/:id", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
     
+    const proposal = (db as any).projects.find(p => p.id === req.params.id);
+    if (!proposal) return res.status(404).json({ error: "Not found" });
+    
+    if (!authorizeProposalAccess(user, proposal)) return res.status(403).json({ error: "Unauthorized for this proposal" });
+    
+    if (proposal.status !== "Draft" && proposal.status !== "Returned for Correction" && proposal.status !== "Query Raised") {
+       return res.status(400).json({ error: "Cannot edit proposal in current status" });
+    }
+
+    const { projectName, category, ministry, state, district, areaRequired, implementingAgency, objective, action, footprint } = req.body;
+    
+    if (category && !VALID_CATEGORIES.includes(category)) return res.status(400).json({ error: "Invalid category", code: "ERR_INVALID_CATEGORY" });
+    if (ministry && !VALID_MINISTRIES.includes(ministry)) return res.status(400).json({ error: "Invalid ministry", code: "ERR_INVALID_MINISTRY" });
+    if (state && !VALID_STATES.includes(state)) return res.status(400).json({ error: "Invalid state", code: "ERR_INVALID_STATE" });
+    const finalState = state || proposal.state;
+    const finalDistrict = district || proposal.district;
+    if (district && (!VALID_DISTRICTS[finalState] || !VALID_DISTRICTS[finalState].includes(finalDistrict))) return res.status(400).json({ error: "Invalid district for the selected state", code: "ERR_INVALID_DISTRICT" });
+
+    
+    if (projectName) proposal.projectName = projectName.trim();
+    if (category) proposal.category = category;
+    if (ministry) proposal.ministry = ministry;
+    if (state) proposal.state = state;
+    if (district) proposal.district = district;
+    if (areaRequired) proposal.areaRequired = parseFloat(areaRequired);
+    if (implementingAgency) proposal.implementingAgency = implementingAgency;
+    if (objective) proposal.objective = objective;
+    if (footprint) proposal.footprint = footprint;
+
+    if (action === "submit") {
+      proposal.status = "Submitted";
+      proposal.stage = "Scrutiny";
+      proposal.dateSubmitted = new Date().toISOString().split('T')[0];
+    } else if (action === "resubmit") {
+      proposal.status = "Submitted";
+      proposal.stage = "Scrutiny";
+    }
+    
+    const auditEvent = {
+       id: "AUD-" + Date.now(),
+       projectId: proposal.id,
+       action: action === "submit" ? "PROPOSAL_SUBMITTED" : (action === "resubmit" ? "PROPOSAL_RESUBMITTED" : "PROPOSAL_UPDATED"),
+       stage: proposal.stage,
+       remarks: `Proposal updated`,
+       executedBy: user.username,
+       timestamp: new Date().toISOString()
+    };
+    (db as any).auditEvents.push(auditEvent);
+    createNotification(user, "UPDATE", "Proposal Updated", "Proposal updated", proposal ? proposal.id : "");
+    res.json({ success: true, proposal, auditEvent });
+  });
+
+  
+  
+  const upload = multer({ 
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  });
+
+  app.post("/api/proposals/:id/documents", authenticateToken, upload.single('file'), (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+    
+    const proposal = (db as any).projects.find(p => p.id === req.params.id);
+    if (!proposal) return res.status(404).json({ error: "Not found" });
+    
+    if (!authorizeProposalAccess(user, proposal)) return res.status(403).json({ error: "Unauthorized for this proposal" });
+    
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const allowedMimes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'image/jpeg', 'image/png'];
+    if (!allowedMimes.includes(req.file.mimetype)) {
+        return res.status(400).json({ error: "Invalid file type" });
+    }
+
+    const hash = crypto.createHash('sha256');
+    hash.update(req.file.buffer);
+    const checksum = hash.digest('hex');
+
+    const documentId = "DOC-" + Date.now();
+    const version = 1;
+
+    const newDoc = {
+        documentId,
+        proposalId: proposal.id,
+        projectId: proposal.projectId || proposal.id,
+        documentType: req.body.documentType || 'Proposal Attachment',
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        version,
+        uploadedBy: user.username,
+        uploadedAt: new Date().toISOString(),
+        checksum,
+        checksumAlgorithm: 'SHA-256',
+        status: 'Active',
+        buffer: req.file.buffer // In-memory storage for demo
+    };
+
+    (db as any).documents = (db as any).documents || [];
+    (db as any).documents.push(newDoc);
+
+    const auditEvent = {
+        id: "AUD-" + Date.now(),
+        projectId: proposal.id,
+        action: "DOCUMENT_UPLOADED",
+        stage: proposal.stage,
+        remarks: `Uploaded ${req.file.originalname}`,
+        executedBy: user.username,
+        timestamp: new Date().toISOString()
+    };
+    (db as any).auditEvents.push(auditEvent);
+
+    res.json({ success: true, document: { ...newDoc, buffer: undefined }, auditEvent });
+  });
+
+  app.post("/api/proposals/:id/workflow", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen" || user.role === "Field Surveyor") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+    
+    const proposal = (db as any).projects.find(p => p.id === req.params.id);
+    if (!proposal) return res.status(404).json({ error: "Not found" });
+    
+    if (!authorizeProposalAccess(user, proposal)) return res.status(403).json({ error: "Unauthorized for this proposal" });
+
+    const { actionId, remarks, deadline } = req.body;
+    
+    if (actionId === "REJECT" || actionId === "RETURN_FOR_CORRECTION") {
+       if (!remarks || remarks.trim().length === 0) {
+          return res.status(400).json({ error: "Reason is required", code: "ERR_REJECTION_REASON_REQUIRED" });
+       }
+    }
+
+    const allowedTransitions = {
+
+      "Submitted": ["START_SCRUTINY"],
+      "Under Scrutiny": ["APPROVE", "REJECT", "RETURN_FOR_CORRECTION", "RAISE_QUERY"],
+      "Query Raised": ["RESPOND_QUERY"],
+      "Returned for Correction": ["RESUBMIT"]
+    };
+    
+    // Normalize status for logic if needed, but here we can map specific actions
+    if (actionId === "START_SCRUTINY") proposal.status = "Under Scrutiny";
+    else if (actionId === "APPROVE") {
+       proposal.status = "Approved";
+       proposal.stage = "Notification";
+    }
+    else if (actionId === "REJECT") proposal.status = "Rejected";
+    else if (actionId === "RETURN_FOR_CORRECTION") {
+       proposal.status = "Returned for Correction";
+       proposal.scrutinyCorrection = remarks;
+    }
+    else if (actionId === "RAISE_QUERY") {
+       proposal.status = "Query Raised";
+       proposal.scrutinyQuery = remarks;
+    }
+    else if (actionId === "RESPOND_QUERY") proposal.status = "Under Scrutiny";
+    else {
+       return res.status(400).json({ error: "Invalid action" });
+    }
+    
+    const auditEvent = {
+       id: "AUD-" + Date.now(),
+       projectId: proposal.id,
+       action: actionId,
+       stage: proposal.stage,
+       remarks: remarks || "",
+       executedBy: user.username,
+       timestamp: new Date().toISOString()
+    };
+    (db as any).auditEvents.push(auditEvent);
+    createNotification(user, "UPDATE", "Proposal Updated", "Proposal updated", proposal ? proposal.id : "");
+    res.json({ success: true, proposal, auditEvent });
+  });
+
+
+  app.get("/api/search", authenticateToken, (req, res) => {
+    const q = ((req.query.q as string) || "").toLowerCase();
     const results = [];
     
-    // search projects
-    mockProposals.forEach(p => {
-      if (p.projectName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || p.district.toLowerCase().includes(q)) {
-        results.push({ type: "Project", id: p.id, name: p.projectName, detail: p.state + " • " + p.district });
+    (db as any).projects.forEach(p => {
+      if (p.projectName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)) {
+        results.push({ id: p.id, type: "Project", name: p.projectName, detail: `${p.state} • ${p.district}` });
+      }
+    });
+    (db as any).parcels.forEach(p => {
+      if (p.ulpin.toLowerCase().includes(q) || p.parcelId.toLowerCase().includes(q) || p.village.toLowerCase().includes(q) || p.surveyNumber.toLowerCase().includes(q)) {
+        results.push({ id: p.projectId, type: "Parcel", name: `ULPIN: ${p.ulpin}`, detail: `${p.state} • ${p.district}` });
       }
     });
 
-    // We do not have full parcels mock array outside, but we can return some ULPINs
-    const mockUlpins = [
-      { ulpin: "06122344556677", project: "Delhi-Mumbai Expressway (Phase 4)", name: "Gram Panchayat, Khedki", detail: "Haryana • Nuh" },
-      { ulpin: "06122344556678", project: "Delhi-Mumbai Expressway (Phase 4)", name: "Commercial Plot", detail: "Haryana • Nuh" },
-      { ulpin: "27122344556677", project: "Pune-Nashik Semi High-Speed Rail", name: "Smt. Kavita Patil", detail: "Maharashtra • Pune" }
-    ];
-    
-    mockUlpins.forEach(u => {
-       if (u.ulpin.includes(q) || u.name.toLowerCase().includes(q)) {
-          results.push({ type: "Parcel", id: u.ulpin, name: u.name, detail: u.detail });
-       }
-    });
-    
-    res.json(results);
+    res.json(results.slice(0, 5));
   });
-  app.get("/api/alerts", (req, res) => {
-    const state = req.query.state || "All States";
-    const alerts = [
-      { id: "ALT-001", type: "Lapse Risk", message: "Section 24(2) lapse risk: Award is 4.8 years old with pending possession for CBIC Node 2.", projectId: "PRJ-2026-003", projectName: "CBIC Node 2", timestamp: "2026-09-08T10:30:00Z", severity: "Critical", isRead: false },
-      { id: "ALT-002", type: "SLA Breach", message: "Sec 19 Declaration delayed by 45 days beyond SIA clearance.", projectId: "PRJ-2026-002", projectName: "Pune-Nashik Semi High-Speed Rail", timestamp: "2026-09-08T08:15:00Z", severity: "Warning", isRead: false },
-      { id: "ALT-003", type: "Approval Pending", message: "District LAO submitted compensation award for Nuh Expressway Phase.", projectId: "PRJ-2026-001", projectName: "Delhi-Mumbai Expressway", timestamp: "2026-09-07T16:45:00Z", severity: "Info", isRead: true },
-    ];
-    if (state === "Delhi") {
-      res.json([{ id: "ALT-DEL-1", type: "SLA Breach", message: "Urban encroachment causing delay in Okhla Underpass.", projectId: "PRJ-2026-009", projectName: "Okhla Underpass", timestamp: "2026-09-08T11:00:00Z", severity: "Critical", isRead: false }]);
+
+  app.get("/api/alerts", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user).map(p => p.id);
+    res.json((db as any).alerts.filter(a => projs.includes(a.projectId)));
+  });
+
+  
+  app.get("/api/compensation", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    let comps = (db as any).compensation;
+    
+    // Role based filtering
+    if (user.role === "State Nodal Officer" && user.state !== "All") {
+       comps = comps.filter(c => c.state === user.state);
+    } else if (user.role === "District LAO" && user.district !== "All") {
+       comps = comps.filter(c => c.district === user.district);
+    } else if (user.role === "Affected Citizen") {
+       comps = comps.filter(c => c.ulpin === "06122344556677"); // Demo citizen ULPIN
+    }
+    
+    const projs = filterProjects(req.query, user).map(p => p.id);
+    comps = comps.filter(c => projs.includes(c.projectId));
+    
+    res.json(comps);
+  });
+
+
+  
+  app.post("/api/compensation/:id/assess", authenticateToken, (req, res) => {
+    const comp = (db as any).compensation.find(c => c.id === req.params.id);
+    if (!comp) return res.status(404).json({ error: "Not found" });
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") return res.status(403).json({ error: "Unauthorized" });
+
+    // Enforce Jurisdiction
+    if (user.role === "State Nodal Officer" && user.state !== "All" && user.state !== comp.state) return res.status(403).json({ error: "Unauthorized state" });
+    if (user.role === "District LAO" && user.district !== "All" && user.district !== comp.district) return res.status(403).json({ error: "Unauthorized district" });
+
+    const { marketValue, additionalComponents = [] } = req.body;
+    if (typeof marketValue !== 'number' || marketValue < 0) return res.status(400).json({ error: "Invalid market value" });
+    
+    comp.marketValue = marketValue;
+    comp.solatium = marketValue; // 100% solatium rule
+    comp.additionalComponents = additionalComponents;
+    comp.totalAssessed = comp.marketValue + comp.solatium + additionalComponents.reduce((acc, c) => acc + (c.amount || 0), 0);
+    comp.assessmentStatus = "SUBMITTED";
+    comp.updatedAt = new Date().toISOString();
+
+    res.json(comp);
+  });
+
+  app.post("/api/compensation/:id/approve", authenticateToken, (req, res) => {
+    const comp = (db as any).compensation.find(c => c.id === req.params.id);
+    if (!comp) return res.status(404).json({ error: "Not found" });
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") return res.status(403).json({ error: "Unauthorized" });
+
+    // Enforce Jurisdiction
+    if (user.role === "State Nodal Officer" && user.state !== "All" && user.state !== comp.state) return res.status(403).json({ error: "Unauthorized state" });
+    if (user.role === "District LAO" && user.district !== "All" && user.district !== comp.district) return res.status(403).json({ error: "Unauthorized district" });
+
+    const { action, remarks } = req.body;
+    if (action === "REJECT" || action === "RETURN") {
+        if (!remarks) return res.status(400).json({ error: "Remarks required" });
+        comp.assessmentStatus = action;
+    } else if (action === "APPROVE") {
+        comp.assessmentStatus = "APPROVED";
+        comp.approvedAmount = comp.totalAssessed;
+        comp.balanceAmount = comp.approvedAmount - comp.disbursedAmount;
     } else {
-      res.json(alerts);
+        return res.status(400).json({ error: "Invalid action" });
     }
-    return;
-    res.json([
-      { id: "ALT-001", type: "Lapse Risk", message: "Section 24(2) lapse risk: Award is 4.8 years old with pending possession for CBIC Node 2.", projectId: "PRJ-2026-003", projectName: "CBIC Node 2", timestamp: "2026-09-08T10:30:00Z", severity: "Critical", isRead: false },
-      { id: "ALT-002", type: "SLA Breach", message: "Sec 19 Declaration delayed by 45 days beyond SIA clearance.", projectId: "PRJ-2026-002", projectName: "Pune-Nashik Semi High-Speed Rail", timestamp: "2026-09-08T08:15:00Z", severity: "Warning", isRead: false },
-      { id: "ALT-003", type: "Approval Pending", message: "District LAO submitted compensation award for Nuh Expressway Phase.", projectId: "PRJ-2026-001", projectName: "Delhi-Mumbai Expressway", timestamp: "2026-09-07T16:45:00Z", severity: "Info", isRead: true },
-    ]);
+    comp.updatedAt = new Date().toISOString();
+
+    res.json(comp);
   });
 
+  app.post("/api/compensation/:id/pay", authenticateToken, (req, res) => {
+    const comp = (db as any).compensation.find(c => c.id === req.params.id);
+    if (!comp) return res.status(404).json({ error: "Not found" });
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") return res.status(403).json({ error: "Unauthorized" });
 
-  const mockDocuments = [
-    { id: "DOC-101", projectId: "PRJ-2026-001", stage: "Notification", title: "Gazette_Sec11_3(A)_Nuh_Signed.pdf", type: "Gazette", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-10-12", checksum: "8f4e2a...c91b", status: "Verified", url: "/documents/mock1.pdf" },
-    { id: "DOC-102", projectId: "PRJ-2026-001", stage: "Notification", title: "SIA_Report_DelhiMumbai_Draft.pdf", type: "Report", version: "v2.1", uploadedBy: "PIA Rep", uploadDate: "2025-10-25", checksum: "3b91ec...4a22", status: "Verified", url: "/documents/mock2.pdf" },
-    { id: "DOC-103", projectId: "PRJ-2026-001", stage: "Notification", title: "Environmental_Clearance.pdf", type: "Clearance", version: "v1.0", uploadedBy: "MoEF", uploadDate: "2025-11-01", checksum: "1c22df...11e3", status: "Verified", url: "/documents/mock3.pdf" },
-    { id: "DOC-104", projectId: "PRJ-2026-001", stage: "Notification", title: "Public_Hearing_Minutes.pdf", type: "Report", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-11-05", checksum: "7c22df...11e3", status: "Verified", url: "/documents/mock4.pdf" },
-    
-    { id: "DOC-201", projectId: "PRJ-2026-002", stage: "Declaration", title: "SIA_Report_PuneNashik_Draft.pdf", type: "Report", version: "v2.1", uploadedBy: "PIA Rep", uploadDate: "2025-10-25", checksum: "3b91ec...4a22", status: "Pending Signature", url: "/documents/mock5.pdf" },
-    { id: "DOC-202", projectId: "PRJ-2026-002", stage: "Declaration", title: "Sec19_Declaration_Draft.pdf", type: "Legal", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-12-15", checksum: "4c22df...11e3", status: "Draft", url: "/documents/mock6.pdf" },
-    { id: "DOC-203", projectId: "PRJ-2026-002", stage: "Declaration", title: "Land_Schedule_Pune.xlsx", type: "Data", version: "v3.0", uploadedBy: "Surveyor", uploadDate: "2026-01-02", checksum: "5c22df...11e3", status: "Verified", url: "/documents/mock7.xlsx" },
-    { id: "DOC-204", projectId: "PRJ-2026-002", stage: "Declaration", title: "Objection_Hearing_Notes.pdf", type: "Report", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2026-01-04", checksum: "6c22df...11e3", status: "Verified", url: "/documents/mock8.pdf" },
-    
-    { id: "DOC-301", projectId: "PRJ-2026-003", stage: "Award", title: "Award_Enquiry_Kanchipuram.pdf", type: "Legal", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-11-05", checksum: "7c22df...11e3", status: "Verified", url: "/documents/mock9.pdf" },
-    { id: "DOC-302", projectId: "PRJ-2026-003", stage: "Award", title: "Valuation_Report_Kanchipuram.pdf", type: "Financial", version: "v1.2", uploadedBy: "Valuer", uploadDate: "2025-11-20", checksum: "8c22df...11e3", status: "Verified", url: "/documents/mock10.pdf" },
-    { id: "DOC-303", projectId: "PRJ-2026-003", stage: "Award", title: "Draft_Award_Sec23.pdf", type: "Legal", version: "v2.0", uploadedBy: "District LAO", uploadDate: "2025-12-10", checksum: "9c22df...11e3", status: "Under Review", url: "/documents/mock11.pdf" },
-    { id: "DOC-304", projectId: "PRJ-2026-003", stage: "Award", title: "Beneficiary_List_Final.xlsx", type: "Data", version: "v1.0", uploadedBy: "Revenue Officer", uploadDate: "2026-01-05", checksum: "ac22df...11e3", status: "Verified", url: "/documents/mock12.xlsx" },
-    
-    { id: "DOC-401", projectId: "PRJ-2026-004", stage: "Compensation", title: "Gazette_Notification_Kalyan.pdf", type: "Gazette", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2024-06-12", checksum: "bc22df...11e3", status: "Verified", url: "/documents/mock13.pdf" },
-    { id: "DOC-402", projectId: "PRJ-2026-004", stage: "Compensation", title: "Award_Order_Kalyan.pdf", type: "Legal", version: "v1.0", uploadedBy: "Collector", uploadDate: "2024-10-05", checksum: "cc22df...11e3", status: "Verified", url: "/documents/mock14.pdf" },
-    { id: "DOC-403", projectId: "PRJ-2026-004", stage: "Compensation", title: "DBT_Disbursement_Log.xlsx", type: "Financial", version: "v5.1", uploadedBy: "Treasury", uploadDate: "2025-01-20", checksum: "dc22df...11e3", status: "Verified", url: "/documents/mock15.xlsx" },
-    { id: "DOC-404", projectId: "PRJ-2026-004", stage: "Compensation", title: "Grievance_Redressal_Report.pdf", type: "Report", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-02-15", checksum: "ec22df...11e3", status: "Verified", url: "/documents/mock16.pdf" },
-    
-    { id: "DOC-501", projectId: "PRJ-2026-005", stage: "Possession", title: "Possession_Notice_Okhla.pdf", type: "Legal", version: "v1.0", uploadedBy: "District LAO", uploadDate: "2025-10-10", checksum: "fc22df...11e3", status: "Verified", url: "/documents/mock17.pdf" },
-    { id: "DOC-502", projectId: "PRJ-2026-005", stage: "Possession", title: "Court_Stay_Order.pdf", type: "Legal", version: "v1.0", uploadedBy: "Legal Dept", uploadDate: "2025-11-05", checksum: "0c22df...11e3", status: "Verified", url: "/documents/mock18.pdf" },
-    { id: "DOC-503", projectId: "PRJ-2026-005", stage: "Possession", title: "Site_Inspection_Photos.zip", type: "Media", version: "v1.0", uploadedBy: "Surveyor", uploadDate: "2025-10-15", checksum: "1d22df...11e3", status: "Verified", url: "/documents/mock19.zip" },
-    { id: "DOC-504", projectId: "PRJ-2026-005", stage: "Possession", title: "Encroachment_Assessment.pdf", type: "Report", version: "v1.0", uploadedBy: "Revenue Officer", uploadDate: "2025-10-20", checksum: "2d22df...11e3", status: "Verified", url: "/documents/mock20.pdf" }
-  ];
+    // Enforce Jurisdiction
+    if (user.role === "State Nodal Officer" && user.state !== "All" && user.state !== comp.state) return res.status(403).json({ error: "Unauthorized state" });
+    if (user.role === "District LAO" && user.district !== "All" && user.district !== comp.district) return res.status(403).json({ error: "Unauthorized district" });
 
-  app.get("/api/compensation", (req, res) => {
-    const projs = filterProjects(req.query);
-    const validProjIds = projs.map(p => p.id);
-    const allComp = [
-      { id: "COMP-101", projectId: "PRJ-2026-001", ulpin: "06122344556677", ownerName: "Gram Panchayat, Khedki", marketValue: 8500000, solatium: 8500000, totalAssessed: 17000000, amountDisbursed: 17000000, disbursementDate: "2026-08-15", status: "Disbursed" },
-      { id: "COMP-102", projectId: "PRJ-2026-002", ulpin: "27122344556688", ownerName: "Smt. Kavita Patil", marketValue: 4200000, solatium: 4200000, totalAssessed: 8400000, amountDisbursed: 0, disbursementDate: null, status: "Processing DBT" },
-      { id: "COMP-103", projectId: "PRJ-2026-003", ulpin: "55443322110099", ownerName: "Abdul Khan", marketValue: 3200000, solatium: 3200000, totalAssessed: 6400000, amountDisbursed: 0, disbursementDate: null, status: "Pending" },
-      { id: "COMP-104", projectId: "PRJ-2026-004", ulpin: "27122344556699", ownerName: "Rajesh Kumar", marketValue: 5000000, solatium: 5000000, totalAssessed: 10000000, amountDisbursed: 10000000, disbursementDate: "2025-01-10", status: "Disbursed" }
-    ];
-    res.json(allComp.filter(c => validProjIds.includes(c.projectId)));
-  });
-
-  app.get("/api/rnr", (req, res) => {
-    const projs = filterProjects(req.query);
-    const validProjIds = projs.map(p => p.id);
-    const allRnr = [
-      { id: "RNR-001", projectId: "PRJ-2026-001", ulpin: "06122344556677", familyHead: "Ramesh Singh", category: "Agricultural Labourer", displacementStatus: "Displaced", entitlements: { housing: true, employment: true, annuity: false }, overallStatus: "In Progress" },
-      { id: "RNR-002", projectId: "PRJ-2026-002", ulpin: "27122344556688", familyHead: "Smt. Kavita Patil", category: "Owner", displacementStatus: "Affected Not Displaced", entitlements: { housing: false, employment: false, annuity: true }, overallStatus: "Settled" },
-      { id: "RNR-003", projectId: "PRJ-2026-003", ulpin: "55443322110099", familyHead: "Abdul Khan", category: "Owner", displacementStatus: "Affected Not Displaced", entitlements: { housing: false, employment: false, annuity: true }, overallStatus: "Pending" },
-      { id: "RNR-004", projectId: "PRJ-2026-004", ulpin: "27122344556699", familyHead: "Rajesh Kumar", category: "Owner", displacementStatus: "Displaced", entitlements: { housing: true, employment: false, annuity: true }, overallStatus: "Settled" }
-    ];
-    res.json(allRnr.filter(r => validProjIds.includes(r.projectId)));
-  });
-
-  app.get("/api/documents", (req, res) => {
-    const projs = filterProjects(req.query);
-    const validProjIds = projs.map(p => p.id);
-    const { stage } = req.query;
+    if (comp.assessmentStatus !== "APPROVED") return res.status(400).json({ error: "Assessment not approved" });
     
-    let docs = mockDocuments.filter(d => validProjIds.includes(d.projectId));
-    if (stage && stage !== "All Stages") {
-       // Filter documents strictly by stage if a specific workflow stage is requested
-       docs = docs.filter(d => d.stage.toLowerCase() === stage.toLowerCase());
+    const { amount } = req.body;
+    if (typeof amount !== 'number' || amount <= 0 || amount > comp.balanceAmount) return res.status(400).json({ error: "Invalid payment amount" });
+
+    comp.disbursedAmount += amount;
+    comp.balanceAmount = comp.approvedAmount - comp.disbursedAmount;
+    
+    if (comp.balanceAmount === 0) {
+        comp.paymentStatus = "PAID";
+    } else {
+        comp.paymentStatus = "PARTIALLY_PAID";
     }
+
+    const paymentRef = "PFMS-DEMO-" + new Date().getFullYear() + "-" + Math.floor(1000 + Math.random() * 9000);
+    const date = new Date().toISOString().split('T')[0];
+
+    comp.paymentHistory.push({
+        id: "PAY-" + Math.floor(1000 + Math.random() * 9000),
+        reference: paymentRef,
+        amount: amount,
+        date: date,
+        status: "PAID",
+        initiatedBy: user.role
+    });
+
+    comp.updatedAt = new Date().toISOString();
+
+    res.json(comp);
+  });
+
+  app.get("/api/rnr", authenticateToken, (req, res) => {
+
+    const projs = filterProjects(req.query, (req as any).user).map(p => p.id);
+    res.json((db as any).rnr.filter(r => projs.includes(r.projectId)));
+  });
+
+  
+  // File Validation
+  const validateFile = (file: Express.Multer.File): { valid: boolean, error?: string } => {
+    if (!file || file.size === 0) return { valid: false, error: "Empty or corrupt file" };
+    if (file.size > 10 * 1024 * 1024) return { valid: false, error: "File exceeds 10MB limit" };
+    
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExtensions = ['.pdf', '.jpg', '.jpeg', '.png', '.doc', '.docx'];
+    if (!allowedExtensions.includes(ext)) {
+        return { valid: false, error: "Unsupported file extension" };
+    }
+
+    const mime = file.mimetype;
+    const allowedMimes = ['application/pdf', 'image/jpeg', 'image/png', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    if (!allowedMimes.includes(mime)) {
+        return { valid: false, error: "Unsupported MIME type" };
+    }
+
+    if (ext === '.pdf') {
+        const header = file.buffer.toString('hex', 0, 4);
+        if (header !== '25504446') {
+            return { valid: false, error: "File extension does not match content (tampered)" };
+        }
+    }
+    
+    if (ext === '.jpg' || ext === '.jpeg') {
+        const header = file.buffer.toString('hex', 0, 3).toUpperCase();
+        if (header !== 'FFD8FF') {
+            return { valid: false, error: "File extension does not match content (tampered)" };
+        }
+    }
+
+    if (ext === '.png') {
+        const header = file.buffer.toString('hex', 0, 4).toUpperCase();
+        if (header !== '89504E47') {
+            return { valid: false, error: "File extension does not match content (tampered)" };
+        }
+    }
+
+    return { valid: true };
+  };
+
+  // Verify Role/Jurisdiction for Documents
+  const checkDocJurisdiction = (doc, user) => {
+    if (user.role === "Affected Citizen") {
+        return doc.ulpin === user.ulpin || false; 
+    }
+    if (user.role === "State Nodal Officer" && user.jurisdiction !== "All") {
+        const p = (db as any).projects.find(p => p.id === doc.projectId);
+        if (p && p.state !== user.jurisdiction) return false;
+    }
+    if (user.role === "District LAO" && user.jurisdiction !== "All") {
+        const p = (db as any).projects.find(p => p.id === doc.projectId);
+        if (p && p.district !== user.jurisdiction) return false;
+    }
+    return true;
+  };
+
+  app.get("/api/documents", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    const projs = filterProjects(req.query, user).map(p => p.id);
+    let docs = (db as any).documents.filter(d => projs.includes(d.projectId));
+    
+    // Filter by Citizen ULPIN if applicable
+    if (user.role === "Affected Citizen" && user.ulpin) {
+       docs = docs.filter(d => d.ulpin === user.ulpin);
+    }
+    
+    // Additional Filters
+    if (req.query.type && req.query.type !== 'ALL') {
+       docs = docs.filter(d => d.type === req.query.type);
+    }
+    if (req.query.status && req.query.status !== 'ALL') {
+       docs = docs.filter(d => d.status === req.query.status);
+    }
+    if (req.query.q) {
+       const q = (req.query.q as string).toLowerCase();
+       docs = docs.filter(d => d.id.toLowerCase().includes(q) || d.title.toLowerCase().includes(q) || d.fileName.toLowerCase().includes(q));
+    }
+    
+    // Verify jurisdiction over all remaining
+    docs = docs.filter(d => checkDocJurisdiction(d, user));
+    
     res.json(docs);
   });
 
-  app.get("/api/awards", (req, res) => {
-      const state = req.query.state || "All States";
-      const isDelhi = state === "Delhi";
-    res.json([
-      { id: "AWD-2026-001", projectId: "PRJ-2026-001", projectName: "Delhi-Mumbai Expressway (Phase 4)", date: "2026-03-15", totalAmount: 450000000, beneficiariesCount: 152, status: "Published", issuingAuthority: "District Collector, Nuh" },
-      { id: "AWD-2026-002", projectId: "PRJ-2026-002", projectName: "Pune-Nashik Semi High-Speed Rail", date: "2026-05-22", totalAmount: 820000000, beneficiariesCount: 340, status: "Draft", issuingAuthority: "Competent Authority, Pune" },
-      { id: "AWD-2026-003", projectId: "PRJ-2026-003", projectName: "Chennai-Bengaluru Industrial Corridor", date: "2026-01-10", totalAmount: 120000000, beneficiariesCount: 45, status: "Under Review", issuingAuthority: "District LAO, Kanchipuram" },
-    ]);
+  const uploadMiddleware = multer({ 
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 } // 10MB
   });
 
-  app.get("/api/reports", (req, res) => {
-      const state = req.query.state || "All States";
-      const isDelhi = state === "Delhi";
-    res.json([
-      { id: "REP-991", title: "Q3 State-wise Acquisition Progress", type: "Progress", generatedDate: "2026-09-01", generatedBy: "System", format: "PDF", size: "2.4 MB" },
-      { id: "REP-992", title: "DBT Disbursement Delay Analysis", type: "Financial", generatedDate: "2026-08-28", generatedBy: "Admin", format: "XLSX", size: "1.1 MB" },
-      { id: "REP-993", title: "Pending R&R Settlements - Maharashtra", type: "Social", generatedDate: "2026-08-15", generatedBy: "SIA Officer", format: "PDF", size: "3.5 MB" },
-    ]);
-  });
-
-  app.get("/api/grievances", (req, res) => {
-      const state = req.query.state || "All States";
-      const isDelhi = state === "Delhi";
-    res.json([
-      { id: "GRV-001", trackingId: "G-2026-MH-4421", category: "Compensation Assessment", description: "Market value assessed is lower than recent circle rate revisions.", submittedBy: "Ramesh Singh", submittedDate: "2026-09-02", status: "Open", assignedTo: "District LAO", priority: "High" },
-      { id: "GRV-002", trackingId: "G-2026-HR-1132", category: "R&R Eligibility", description: "Not included in displaced list despite living on parcel for 5 years.", submittedBy: "Abdul Khan", submittedDate: "2026-08-15", status: "In Progress", assignedTo: "SIA Authority", priority: "Medium" },
-      { id: "GRV-003", trackingId: "G-2026-TN-9984", category: "Measurement Dispute", description: "Acquired area is 0.5 Ha but notification states 0.8 Ha.", submittedBy: "Smt. Kavita Patil", submittedDate: "2026-07-10", status: "Resolved", assignedTo: "Surveyor Dept", priority: "Low" },
-    ]);
-  });
-
-  app.get("/api/workflow", (req, res) => {
-    const projs = filterProjects(req.query);
-    if (projs.length === 0) return res.json([]);
+  app.post("/api/documents", authenticateToken, uploadMiddleware.single('file'), (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor") return res.status(403).json({ error: "Unauthorized to upload" });
     
-    // Aggregate or use the first project's data if a specific one is selected
-    const p = projs[0];
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "No file uploaded" });
+    
+    const validation = validateFile(file);
+    if (!validation.valid) return res.status(400).json({ error: validation.error });
+    
+    const { title, type, projectId, parcelId, ulpin, rnrId, compensationId, workflowId, remarks } = req.body;
+    
+    if (!projectId || !(db as any).projects.find(p => p.id === projectId)) {
+        return res.status(400).json({ error: "Invalid Project ID" });
+    }
+    
+    const docId = "DOC-" + Date.now();
+    const fileName = docId + "_" + file.originalname;
+    const storagePath = path.join(process.cwd(), "uploads", fileName);
+    
+    // Write actual bytes
+    fs.writeFileSync(storagePath, file.buffer);
+    
+    const checksum = crypto.createHash('sha256').update(file.buffer).digest('hex');
+    
+    const newDoc = {
+        id: docId,
+        title: title || file.originalname,
+        fileName: file.originalname,
+        type: type || "OTHER",
+        version: "1.0",
+        projectId,
+        parcelId,
+        ulpin,
+        rnrId,
+        compensationId,
+        workflowId,
+        uploadedBy: user.email,
+        uploadedByRole: user.role,
+        uploadedAt: new Date().toISOString(),
+        fileSize: (file.size / 1024).toFixed(1) + " KB",
+        mimeType: file.mimetype,
+        storagePath,
+        checksum,
+        checksumAlgorithm: "SHA-256",
+        integrityStatus: "VERIFIED",
+        signatureStatus: "NOT_SIGNED",
+        status: "VERIFIED",
+        remarks
+    };
+    
+    (db as any).documents.push(newDoc);
+    
+    (db as any).auditEvents.push({
+       id: "AUD-" + Date.now(), projectId, parcelId,
+       action: "DOCUMENT_UPLOADED", stage: "Documents", remarks: `Uploaded ${newDoc.fileName}`,
+       executedBy: user.email, timestamp: new Date().toISOString()
+    });
+    
+    res.json({ success: true, data: newDoc });
+  });
+
+  app.post("/api/documents/:id/version", authenticateToken, uploadMiddleware.single('file'), (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor") return res.status(403).json({ error: "Unauthorized to upload" });
+    
+    const doc = (db as any).documents.find(d => d.id === req.params.id);
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    if (!checkDocJurisdiction(doc, user)) return res.status(403).json({ error: "Unauthorized access" });
+    
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "No file uploaded" });
+    
+    const validation = validateFile(file);
+    if (!validation.valid) return res.status(400).json({ error: validation.error });
+    
+    // Archive current to history
+    (db as any).documentVersions.push({
+        versionId: "VER-" + Date.now(),
+        documentId: doc.id,
+        version: doc.version,
+        fileName: doc.fileName,
+        uploadedBy: doc.uploadedBy,
+        uploadedByRole: doc.uploadedByRole,
+        uploadedAt: doc.uploadedAt,
+        fileSize: doc.fileSize,
+        mimeType: doc.mimeType,
+        storagePath: doc.storagePath,
+        checksum: doc.checksum,
+        checksumAlgorithm: doc.checksumAlgorithm,
+        remarks: doc.remarks
+    });
+    
+    // Update current
+    const nextVersion = (parseFloat(doc.version) + 1.0).toFixed(1);
+    const fileName = doc.id + "_v" + nextVersion + "_" + file.originalname;
+    const storagePath = path.join(process.cwd(), "uploads", fileName);
+    
+    fs.writeFileSync(storagePath, file.buffer);
+    const checksum = crypto.createHash('sha256').update(file.buffer).digest('hex');
+    
+    doc.version = nextVersion;
+    doc.fileName = file.originalname;
+    doc.uploadedBy = user.email;
+    doc.uploadedByRole = user.role;
+    doc.uploadedAt = new Date().toISOString();
+    doc.fileSize = (file.size / 1024).toFixed(1) + " KB";
+    doc.mimeType = file.mimetype;
+    doc.storagePath = storagePath;
+    doc.checksum = checksum;
+    doc.integrityStatus = "VERIFIED";
+    doc.remarks = req.body.remarks || "";
+    
+    (db as any).auditEvents.push({
+       id: "AUD-" + Date.now(), projectId: doc.projectId, parcelId: doc.parcelId,
+       action: "DOCUMENT_VERSION_CREATED", stage: "Documents", remarks: `Uploaded version ${nextVersion}`,
+       executedBy: user.email, timestamp: new Date().toISOString()
+    });
+    
+    res.json({ success: true, data: doc });
+  });
+
+  app.get("/api/documents/:id/download", authenticateToken, (req, res) => {
+    const doc = (db as any).documents.find(d => d.id === req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (!checkDocJurisdiction(doc, (req as any).user)) return res.status(403).json({ error: "Unauthorized access" });
+    
+    if (fs.existsSync(doc.storagePath)) {
+        (db as any).auditEvents.push({
+           id: "AUD-" + Date.now(), projectId: doc.projectId, parcelId: doc.parcelId,
+           action: "DOCUMENT_DOWNLOADED", stage: "Documents", remarks: `Downloaded ${doc.fileName}`,
+           executedBy: (req as any).user.email, timestamp: new Date().toISOString()
+        });
+        res.download(doc.storagePath, doc.fileName);
+    } else {
+        res.status(404).json({ error: "File not found on disk" });
+    }
+  });
+
+  app.get("/api/documents/:id/download/:version", authenticateToken, (req, res) => {
+    const docVer = (db as any).documentVersions.find(d => d.documentId === req.params.id && d.version === req.params.version);
+    if (!docVer) return res.status(404).json({ error: "Version not found" });
+    const doc = (db as any).documents.find(d => d.id === req.params.id);
+    if (!checkDocJurisdiction(doc, (req as any).user)) return res.status(403).json({ error: "Unauthorized access" });
+    
+    if (fs.existsSync(docVer.storagePath)) {
+        res.download(docVer.storagePath, docVer.fileName);
+    } else {
+        res.status(404).json({ error: "File not found on disk" });
+    }
+  });
+
+  app.post("/api/documents/:id/verify-integrity", authenticateToken, (req, res) => {
+    const doc = (db as any).documents.find(d => d.id === req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (!checkDocJurisdiction(doc, (req as any).user)) return res.status(403).json({ error: "Unauthorized access" });
+    
+    if (!fs.existsSync(doc.storagePath)) {
+        return res.status(404).json({ error: "File missing on disk" });
+    }
+    
+    const fileBuffer = fs.readFileSync(doc.storagePath);
+    const actualHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    
+    if (actualHash === doc.checksum) {
+        doc.integrityStatus = "VERIFIED";
+    } else {
+        doc.integrityStatus = "INTEGRITY_MISMATCH";
+        (db as any).auditEvents.push({
+           id: "AUD-" + Date.now(), projectId: doc.projectId, parcelId: doc.parcelId,
+           action: "DOCUMENT_INTEGRITY_FAILED", stage: "Documents", remarks: `Integrity mismatch for ${doc.fileName}`,
+           executedBy: (req as any).user.email, timestamp: new Date().toISOString()
+        });
+    }
+    
+    res.json({ success: true, integrityStatus: doc.integrityStatus, calculatedChecksum: actualHash });
+  });
+
+  app.get("/api/documents/:id/versions", authenticateToken, (req, res) => {
+    const doc = (db as any).documents.find(d => d.id === req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (!checkDocJurisdiction(doc, (req as any).user)) return res.status(403).json({ error: "Unauthorized access" });
+    
+    const versions = (db as any).documentVersions.filter(v => v.documentId === req.params.id);
+    res.json(versions);
+  });
+
+
+  app.get("/api/awards", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    let validAwards = (db as any).awards;
+    if (user.role === "Citizen") {
+      const citizenUlpin = "06122344556677";
+      validAwards = validAwards.filter(a => a.awardItems.some(i => i.ulpin === citizenUlpin));
+    } else {
+      const projs = filterProjects(req.query, user).map(p => p.id);
+      validAwards = validAwards.filter(a => projs.includes(a.projectId));
+    }
+    res.json(validAwards);
+  });
+
+  app.get("/api/awards/:id", authenticateToken, (req, res) => {
+    const award = (db as any).awards.find(a => a.id === req.params.id);
+    if (!award) return res.status(404).json({ error: "Not found" });
+    const user = (req as any).user;
+    if (user.role === "Citizen") {
+      const citizenUlpin = "06122344556677";
+      if (!award.awardItems.some(i => i.ulpin === citizenUlpin)) return res.status(403).json({ error: "Unauthorized access" });
+    } else {
+      const proj = filterProjects({}, user).find(p => p.id === award.projectId);
+      if (!proj) return res.status(403).json({ error: "Unauthorized access" });
+    }
+    res.json(award);
+  });
+
+  app.post("/api/awards", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (["Auditor", "Citizen"].includes(user.role)) return res.status(403).json({ error: "Unauthorized role" });
+    const award = req.body;
+    const proj = filterProjects({}, user).find(p => p.id === award.projectId);
+    if (!proj) return res.status(403).json({ error: "Unauthorized access" });
+    award.id = "AWD-" + Date.now();
+    award.status = "DRAFT";
+    award.createdBy = user.email;
+    award.createdAt = new Date().toISOString();
+    award.updatedAt = award.createdAt;
+    let totalAmount = 0;
+    award.awardItems.forEach((item, index) => {
+      item.id = award.id + "-" + index;
+      item.awardId = award.id;
+      item.status = "DRAFT";
+      totalAmount += Number(item.awardAmount);
+    });
+    award.totalAmount = totalAmount;
+    award.beneficiaryCount = new Set(award.awardItems.map(i => i.beneficiaryId)).size;
+    (db as any).awards.push(award);
+    logAudit(user, award.projectId, award.id, "AWARD_CREATED", "Created draft award");
+    res.json(award);
+  });
+
+  app.put("/api/awards/:id", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (["Auditor", "Citizen"].includes(user.role)) return res.status(403).json({ error: "Unauthorized role" });
+    const existing = (db as any).awards.find(a => a.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Not found" });
+    if (existing.status !== "DRAFT") return res.status(400).json({ error: "Cannot modify non-draft award" });
+    const proj = filterProjects({}, user).find(p => p.id === existing.projectId);
+    if (!proj) return res.status(403).json({ error: "Unauthorized access" });
+    
+    const updates = req.body;
+    Object.assign(existing, updates, { updatedAt: new Date().toISOString() });
+    
+    let totalAmount = 0;
+    existing.awardItems.forEach(item => {
+      totalAmount += Number(item.awardAmount);
+    });
+    existing.totalAmount = totalAmount;
+    existing.beneficiaryCount = new Set(existing.awardItems.map(i => i.beneficiaryId)).size;
+    logAudit(user, existing.projectId, existing.id, "AWARD_UPDATED", "Updated draft award");
+    res.json(existing);
+  });
+
+  app.post("/api/awards/:id/:action", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    const { id, action } = req.params;
+    const { remarks, rejectionReason } = req.body;
+    const award = (db as any).awards.find(a => a.id === id);
+    if (!award) return res.status(404).json({ error: "Not found" });
+    const proj = filterProjects({}, user).find(p => p.id === award.projectId);
+    if (!proj) return res.status(403).json({ error: "Unauthorized access" });
+
+    if (["Auditor", "Citizen"].includes(user.role)) return res.status(403).json({ error: "Unauthorized role" });
+
+    const now = new Date().toISOString();
+    if (action === "submit") {
+      if (award.status !== "DRAFT") return res.status(400).json({ error: "Invalid transition" });
+      award.status = "SUBMITTED";
+      award.awardItems.forEach(i => i.status = "SUBMITTED");
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_SUBMITTED", "Submitted award for verification");
+    } else if (action === "verify") {
+      if (award.status !== "SUBMITTED") return res.status(400).json({ error: "Invalid transition" });
+      award.status = "VERIFIED";
+      award.awardItems.forEach(i => i.status = "VERIFIED");
+      award.verifiedBy = user.email;
+      award.verifiedAt = now;
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_VERIFIED", "Verified award");
+    } else if (action === "return") {
+      if (award.status !== "SUBMITTED") return res.status(400).json({ error: "Invalid transition" });
+      if (!remarks) return res.status(400).json({ error: "Remarks required" });
+      award.status = "RETURNED";
+      award.awardItems.forEach(i => i.status = "RETURNED");
+      award.remarks = remarks;
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_RETURNED", "Returned award: " + remarks);
+    } else if (action === "approve") {
+      if (award.status !== "VERIFIED") return res.status(400).json({ error: "Invalid transition" });
+      award.status = "APPROVED";
+      award.awardItems.forEach(i => i.status = "APPROVED");
+      award.approvedBy = user.email;
+      award.approvedAt = now;
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_APPROVED", "Approved award");
+    } else if (action === "reject") {
+      if (award.status !== "VERIFIED") return res.status(400).json({ error: "Invalid transition" });
+      if (!rejectionReason) return res.status(400).json({ error: "REJECTION_REASON_REQUIRED" });
+      award.status = "REJECTED";
+      award.awardItems.forEach(i => i.status = "REJECTED");
+      award.rejectedBy = user.email;
+      award.rejectedAt = now;
+      award.rejectionReason = rejectionReason;
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_REJECTED", "Rejected award: " + rejectionReason);
+    } else if (action === "issue") {
+      if (award.status !== "APPROVED") return res.status(400).json({ error: "Invalid transition" });
+      award.status = "ISSUED";
+      award.issueDate = new Date().toISOString().split("T")[0];
+      award.awardItems.forEach(i => i.status = "ISSUED");
+      award.issuedBy = user.email;
+      award.issuedAt = now;
+      award.updatedAt = now;
+      logAudit(user, award.projectId, award.id, "AWARD_ISSUED", "Issued award");
+    } else {
+      return res.status(400).json({ error: "Unknown action" });
+    }
+    res.json(award);
+  });
+
+  app.get("/api/reports", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user).map(p => p.id);
+    res.json((db as any).reports.filter(r => projs.includes(r.projectId)));
+  });
+
+  app.get("/api/grievances", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user).map(p => p.id);
+    res.json((db as any).grievances.filter(g => projs.includes(g.projectId)));
+  });
+
+  function addDays(dateStr, days) {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  }
+
+  function calculateDeadline(status, statutoryDeadline, actualDate) {
+    if (status === 'completed' && actualDate) {
+       return { display: `Completed · ${actualDate}`, status: 'COMPLETED' };
+    }
+    const today = new Date();
+    const deadline = new Date(statutoryDeadline);
+    const diffTime = deadline.getTime() - today.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    if (diffDays < 0) {
+       return { display: `${Math.abs(diffDays)} days overdue`, status: 'OVERDUE', daysOverdue: Math.abs(diffDays) };
+    } else if (diffDays === 0) {
+       return { display: `Due today`, status: 'DUE_TODAY', daysRemaining: 0 };
+    } else if (diffDays <= 14) {
+       return { display: `Due in ${diffDays} days`, status: 'DUE_SOON', daysRemaining: diffDays };
+    } else {
+       return { display: `Pending · Due ${statutoryDeadline}`, status: 'PENDING', daysRemaining: diffDays };
+    }
+  }
+
+  app.get("/api/workflow", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user);
+    if (projs.length === 0) return res.json([]);
+    const p = projs[0]; 
+    
+    const dDate = addDays(p.dateSubmitted, 180);
+    const aDate = addDays(dDate, 365);
+    const cDate = addDays(aDate, 90);
+    const pDate = addDays(cDate, 60);
+    const rDate = addDays(pDate, 180);
+
+    const s1 = p.stage === "Notification" ? "current" : "completed";
+    const s2 = p.stage === "Declaration" ? "current" : (["Award", "Compensation", "Possession", "R&R"].includes(p.stage) ? "completed" : "pending");
+    const s3 = p.stage === "Award" ? "current" : (["Compensation", "Possession", "R&R"].includes(p.stage) ? "completed" : "pending");
+    const s4 = p.stage === "Compensation" ? "current" : (["Possession", "R&R"].includes(p.stage) ? "completed" : "pending");
+    const s5 = p.stage === "Possession" ? "current" : (p.stage === "R&R" ? "completed" : "pending");
+    const s6 = p.stage === "R&R" ? "current" : "pending";
+
     const stages = [
-      { id: 1, name: "notification", status: p.stage === "Notification" ? "current" : "completed", date: p.dateSubmitted },
-      { id: 2, name: "declaration", status: p.stage === "Declaration" ? "current" : (["Award", "Compensation", "Possession", "R&R"].includes(p.stage) ? "completed" : "pending"), date: "2026-03-15" },
-      { id: 3, name: "award", status: p.stage === "Award" ? "current" : (["Compensation", "Possession", "R&R"].includes(p.stage) ? "completed" : "pending"), date: "Pending · Due 2026-06-15" },
-      { id: 4, name: "compensation", status: p.stage === "Compensation" ? "current" : (["Possession", "R&R"].includes(p.stage) ? "completed" : "pending"), date: "Pending · Due 2026-08-01" },
-      { id: 5, name: "possession", status: p.stage === "Possession" ? "current" : (p.stage === "R&R" ? "completed" : "pending"), date: "Pending · Due 2026-10-15" },
-      { id: 6, name: "rnr", status: p.stage === "R&R" ? "current" : "pending", date: "Pending" }
+      { id: 1, name: "notification", status: s1, statutoryDeadline: p.dateSubmitted, actualDate: s1 as string === 'completed' ? p.dateSubmitted : null, ...calculateDeadline(s1, p.dateSubmitted, s1 as string === 'completed' ? p.dateSubmitted : null), authority: "District Collector", pendingActions: s1 as string === 'current' ? [{ id: 'ADVANCE_TO_DECLARATION', name: 'Advance to Declaration', actionType: 'modal' }] : [] },
+      { id: 2, name: "declaration", status: s2, statutoryDeadline: dDate, actualDate: s2 as string === 'completed' ? dDate : null, ...calculateDeadline(s2, dDate, s2 as string === 'completed' ? dDate : null), authority: "State Government", pendingActions: s2 as string === 'current' ? [{ id: 'ADVANCE_TO_AWARD', name: 'Advance to Award', actionType: 'modal' }] : [] },
+      { id: 3, name: "award", status: s3, statutoryDeadline: aDate, actualDate: s3 as string === 'completed' ? aDate : null, ...calculateDeadline(s3, aDate, s3 as string === 'completed' ? aDate : null), authority: "Collector", pendingActions: s3 as string === 'current' ? [{ id: 'ADVANCE_TO_COMPENSATION', name: 'Advance to Compensation', actionType: 'modal' }] : [] },
+      { id: 4, name: "compensation", status: s4, statutoryDeadline: cDate, actualDate: s4 as string === 'completed' ? cDate : null, ...calculateDeadline(s4, cDate, s4 as string === 'completed' ? cDate : null), authority: "CALA", pendingActions: s4 as string === 'current' ? [{ id: 'ADVANCE_TO_POSSESSION', name: 'Advance to Possession', actionType: 'modal' }] : [] },
+      { id: 5, name: "possession", status: s5, statutoryDeadline: pDate, actualDate: s5 as string === 'completed' ? pDate : null, ...calculateDeadline(s5, pDate, s5 as string === 'completed' ? pDate : null), authority: "Executive Engineer", pendingActions: s5 as string === 'current' ? [{ id: 'ADVANCE_TO_RNR', name: 'Advance to R&R', actionType: 'modal' }] : [] },
+      { id: 6, name: "rnr", status: s6, statutoryDeadline: rDate, actualDate: s6 as string === 'completed' ? rDate : null, ...calculateDeadline(s6, rDate, s6 as string === 'completed' ? rDate : null), authority: "R&R Commissioner", pendingActions: s6 as string === 'current' ? [{ id: 'CLOSE_ACQUISITION_STAGE', name: 'Close Acquisition Stage', actionType: 'modal' }] : [] }
     ];
     res.json(stages);
   });
   
-  app.get("/api/risk", (req, res) => {
-    const projs = filterProjects(req.query);
-    const risks = projs.map(p => ({
-      id: p.id, projectName: p.projectName, state: p.state, district: p.district,
-      level: p.riskProfile.level, score: p.riskProfile.score, factors: p.riskProfile.factors,
-      stage: p.stage
-    }));
+  app.get("/api/risk", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user);
+    const risks = projs.map(p => {
+      // Predictive Delay-Risk Engine
+      const dDate = addDays(p.dateSubmitted, 180);
+      const aDate = addDays(dDate, 365);
+      const cDate = addDays(aDate, 90);
+      const pDate = addDays(cDate, 60);
+      
+      let targetDate = p.dateSubmitted;
+      if (p.stage === "Declaration") targetDate = dDate;
+      if (p.stage === "Award") targetDate = aDate;
+      if (p.stage === "Compensation") targetDate = cDate;
+      if (p.stage === "Possession") targetDate = pDate;
+      if (p.stage === "R&R") targetDate = addDays(pDate, 180);
+
+      const diffTime = new Date().getTime() - new Date(targetDate).getTime();
+      const overdueDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      
+      const objectionCount = p.objectionCount ?? 0;
+      const historicalDelayRate = p.historicalDelayRate ?? 0;
+      
+      let score = 20 + (objectionCount * 0.5) + (historicalDelayRate * 0.5);
+      if (overdueDays > 0) {
+         score += Math.min(overdueDays, 50); // cap penalty
+      } else {
+         score -= 10;
+      }
+      
+      score = Math.max(0, Math.min(100, Math.floor(score)));
+      
+      let level = "Low";
+      if (score > 40) level = "Medium";
+      if (score > 75) level = "High";
+      
+      let factors = [];
+      if (overdueDays > 0) factors.push(`${overdueDays} days overdue`);
+      if (objectionCount > 10) factors.push(`${objectionCount} unresolved objections`);
+      if (p.familiesAffected > 50) factors.push(`${p.familiesAffected} affected families`);
+      factors.push(`district historical delay rate: ${historicalDelayRate}%`);
+      
+      // Section-24(2)-style Lapse Risk
+      let lapseRisk = "LOW";
+      let lapseReason = "Within safe operational margins.";
+      if (p.stage === "Possession" && overdueDays > 365) {
+         lapseRisk = "HIGH";
+         lapseReason = "Possession pending for > 1 year after Award/Compensation deadline.";
+      } else if (p.stage === "Compensation" && overdueDays > 180) {
+         lapseRisk = "MEDIUM";
+         lapseReason = "Compensation unpaid for > 6 months after Award.";
+      }
+
+      return {
+        id: p.id, projectName: p.projectName, state: p.state, district: p.district,
+        level: level, score: score, factors: factors, lapseRisk, lapseReason,
+        stage: p.stage, overdueDays: Math.max(0, overdueDays),
+        recommendation: level === "High" ? "Immediate escalation to State Nodal Officer" : (level === "Medium" ? "Schedule review meeting within 7 days" : "Monitor weekly progress")
+      };
+    });
     res.json(risks);
   });
 
-  app.get("/api/kpis", (req, res) => {
-    const projs = filterProjects(req.query);
+  
+  app.get("/api/kpis", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user);
+    const projIds = projs.map(p => p.id);
     
-    let areaNotified = 0;
-    let areaAcquired = 0;
-    let compensationAssessed = 0;
-    let compensationPaid = 0;
-    let familiesAffected = 0;
-    let rrSettled = 0;
+    let areaNotified = 0; let areaAcquired = 0; let familiesAffected = 0; let rrSettled = 0;
     
     projs.forEach(p => {
       areaNotified += p.areaNotified || 0;
       areaAcquired += p.areaAcquired || 0;
-      compensationAssessed += p.compensationAssessed || 0;
-      compensationPaid += p.compensationPaid || 0;
-      familiesAffected += p.familiesAffected || 0;
-      rrSettled += p.rrSettled || 0;
+    });
+    
+    // R&R underlying metrics
+    const rnrRecords = (db as any).rnr.filter(r => projIds.includes(r.projectId));
+    familiesAffected = rnrRecords.length;
+    rrSettled = rnrRecords.filter(r => r.approvalStatus === "SETTLED").length;
+
+    // Calculate compensation from underlying records
+    let compensationAssessed = 0;
+    let compensationPaid = 0;
+    
+    const comps = (db as any).compensation.filter(c => projIds.includes(c.projectId));
+    comps.forEach(c => {
+       if (c.assessmentStatus === "APPROVED" || c.paymentStatus === "PAID" || c.paymentStatus === "PARTIALLY_PAID") {
+           compensationAssessed += (c.totalAssessed || 0);
+           compensationPaid += (c.disbursedAmount || 0);
+       }
     });
 
-    res.json({
+    const curr = {
       areaNotified: Number(areaNotified.toFixed(1)),
       areaAcquired: Number(areaAcquired.toFixed(1)),
       compensationAssessed: Number(compensationAssessed.toFixed(1)),
@@ -331,43 +1757,435 @@ async function startServer() {
       familiesAffected: Math.floor(familiesAffected),
       familiesRnR: Math.floor(rrSettled),
       activeProjects: projs.length
-    });
-  });
-  // replace the old one
-  app.get("/api/parcels", (req, res) => {
-    const projs = filterProjects(req.query);
-    const validStates = projs.map(p => p.state);
-    
-    // Minimal mock parcels mapping to states
-    const parcels = {
-      type: "FeatureCollection",
-      features: [
-        {
-          type: "Feature",
-          geometry: { type: "Polygon", coordinates: [[[77.017, 28.124], [77.019, 28.124], [77.019, 28.126], [77.017, 28.126], [77.017, 28.124]]] },
-          properties: { ulpin: "06122344556677", project: "Delhi-Mumbai Expressway (Phase 4)", status: "Notification", state: "Haryana", district: "Nuh", village: "Khedki", area: 1.2, khasra: "45/2", landType: "Agricultural", owner: "Private" }
-        },
-        {
-          type: "Feature",
-          geometry: { type: "Polygon", coordinates: [[[77.020, 28.120], [77.022, 28.120], [77.022, 28.122], [77.020, 28.122], [77.020, 28.120]]] },
-          properties: { ulpin: "06122344556678", project: "Delhi-Mumbai Expressway (Phase 4)", status: "Award", state: "Haryana", district: "Nuh", village: "Khedki", area: 2.1, khasra: "46/1", landType: "Commercial", owner: "Private" }
-        },
-        {
-          type: "Feature",
-          geometry: { type: "Polygon", coordinates: [[[73.856, 18.520], [73.858, 18.520], [73.858, 18.522], [73.856, 18.522], [73.856, 18.520]]] },
-          properties: { ulpin: "27122344556677", project: "Pune-Nashik Semi High-Speed Rail", status: "Declaration", state: "Maharashtra", district: "Pune", village: "Shivajinagar", area: 0.5, khasra: "12/A", landType: "Residential", owner: "Private" }
-        }
-      ]
+    };
+
+
+    const prev = {
+      areaNotified: curr.areaNotified * 0.9,
+      areaAcquired: curr.areaAcquired * 0.85,
+      compensationAssessed: curr.compensationAssessed * 0.95,
+      compensationDisbursed: curr.compensationDisbursed * 0.8,
+      familiesAffected: curr.familiesAffected * 0.98,
+      familiesRnR: curr.familiesRnR * 0.75,
     };
     
-    // Filter by matching state/district/project via properties.project or properties.state
-    const projNames = projs.map(p => p.projectName);
-    const filteredFeatures = parcels.features.filter(f => projNames.includes(f.properties.project));
-    
-    res.json({ type: "FeatureCollection", features: filteredFeatures });
+    function calcChange(c: number, p: number) {
+       if (p === 0) return c > 0 ? 100.0 : 0.0;
+       return Number((((c - p) / p) * 100).toFixed(1));
+    }
+
+    res.json({
+      ...curr,
+      changes: {
+         areaNotified: calcChange(curr.areaNotified, prev.areaNotified),
+         areaAcquired: calcChange(curr.areaAcquired, prev.areaAcquired),
+         compensationAssessed: calcChange(curr.compensationAssessed, prev.compensationAssessed),
+         compensationDisbursed: calcChange(curr.compensationDisbursed, prev.compensationDisbursed),
+         familiesAffected: calcChange(curr.familiesAffected, prev.familiesAffected),
+         familiesRnR: calcChange(curr.familiesRnR, prev.familiesRnR)
+      }
+    });
   });
 
-  // Vite middleware for development
+  
+  app.post("/api/parcels", authenticateToken, (req, res) => {
+    const { geometry, area, projectId } = req.body;
+    const user = (req as any).user;
+    
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    const proj = (db as any).projects.find(pr => pr.id === projectId);
+    if (!proj) return res.status(404).json({ error: "Project not found" });
+
+    if (user.role === "State Nodal Officer" && user.state !== proj.state) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "District LAO" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "Project Implementing Agency") {
+      const uObj = demoUsers.find(u => u.id === user.id);
+      if (!uObj.assignedProjects.includes(proj.id)) return res.status(403).json({ error: "Unauthorized project" });
+    }
+
+    
+    let finalArea = area;
+    if (geometry && geometry.type === 'Polygon') {
+      finalArea = (turf.area(geometry as any) / 10000).toFixed(2) + ' ha';
+    }
+    const newParcelId = "PAR-" + (Date.now() % 1000000).toString().padStart(6, '0');
+    const newParcel = {
+      parcelId: newParcelId,
+      projectId: projectId || "PRJ-2026-001",
+      ulpin: "Demo-ULPIN-" + (Date.now() % 1000000).toString(),
+      stage: "Notification",
+      state: proj.state,
+      district: proj.district,
+      village: "Draft Village",
+      area: finalArea,
+      surveyNumber: "Draft",
+      landType: "Agricultural",
+      owner: "Pending",
+      risk: "Low",
+      geometry: geometry.coordinates[0]
+    };
+    
+    (db as any).parcels.push(newParcel);
+    
+    (db as any).auditLogs = (db as any).auditLogs || [];
+    (db as any).auditLogs.push({ timestamp: new Date().toISOString(), user: user.name, role: user.role, action: "PARCEL_CREATED", details: "Parcel " + newParcelId + " created" });
+    res.json(newParcel);
+  });
+
+  app.put("/api/parcels/:parcelId", authenticateToken, (req, res) => {
+    const { geometry, area, projectId } = req.body;
+    const { parcelId } = req.params;
+    const user = (req as any).user;
+    
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    const parcelIndex = (db as any).parcels.findIndex(p => p.parcelId === parcelId);
+    if (parcelIndex === -1) return res.status(404).json({ error: "Parcel not found" });
+    
+    const parcel = (db as any).parcels[parcelIndex];
+    const projId = projectId || parcel.projectId;
+    const proj = (db as any).projects.find(pr => pr.id === projId);
+    if (!proj) return res.status(404).json({ error: "Project not found" });
+
+    if (user.role === "State Nodal Officer" && user.state !== proj.state) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "District LAO" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+    if (user.role === "Project Implementing Agency") {
+      const uObj = demoUsers.find(u => u.id === user.id);
+      if (!uObj.assignedProjects.includes(proj.id)) return res.status(403).json({ error: "Unauthorized project" });
+    }
+
+    // Server-side validation
+    let finalArea = area;
+    if (geometry && geometry.type === 'Polygon') {
+      finalArea = (turf.area(geometry as any) / 10000).toFixed(2) + ' ha';
+    }
+
+    (db as any).parcels[parcelIndex] = {
+      ...parcel,
+      projectId: projId,
+      geometry: geometry ? geometry.coordinates[0] : parcel.geometry,
+      area: finalArea || parcel.area
+    };
+
+    // Audit event
+    (db as any).auditLogs = (db as any).auditLogs || [];
+    (db as any).auditLogs.push({ timestamp: new Date().toISOString(), user: user.name, role: user.role, action: "PARCEL_UPDATED", details: "Parcel " + parcelId + " updated" });
+
+    res.json((db as any).parcels[parcelIndex]);
+  });
+
+  app.delete("/api/parcels/:parcelId", authenticateToken, (req, res) => {
+    const { parcelId } = req.params;
+    const user = (req as any).user;
+    
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    const parcelIndex = (db as any).parcels.findIndex(p => p.parcelId === parcelId);
+    if (parcelIndex === -1) return res.status(404).json({ error: "Parcel not found" });
+    
+    const parcel = (db as any).parcels[parcelIndex];
+    const proj = (db as any).projects.find(pr => pr.id === parcel.projectId);
+    
+    if (proj) {
+      if (user.role === "State Nodal Officer" && user.state !== proj.state) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+      if (user.role === "District LAO" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+      if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+      if (user.role === "Project Implementing Agency") {
+        const uObj = demoUsers.find(u => u.id === user.id);
+        if (!uObj.assignedProjects.includes(proj.id)) return res.status(403).json({ error: "Unauthorized project" });
+      }
+    }
+
+    (db as any).parcels.splice(parcelIndex, 1);
+
+    // Audit event
+    (db as any).auditLogs = (db as any).auditLogs || [];
+    (db as any).auditLogs.push({ timestamp: new Date().toISOString(), user: user.name, role: user.role, action: "PARCEL_ARCHIVED", details: "Parcel " + parcelId + " archived" });
+
+    res.json({ success: true });
+  });
+
+  app.post("/api/workflow/execute", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Citizen") {
+      return res.status(403).json({ error: "Unauthorized role for workflow execution" });
+    }
+    
+    const { projectId, stage: frontendStage, actionId, remarks, documentId } = req.body;
+    
+    const projs = filterProjects({ project: projectId }, user);
+    if (projs.length === 0) {
+      return res.status(403).json({ error: "Project not accessible" });
+    }
+    
+    const project = (db as any).projects.find(p => p.id === projectId);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    
+    const currentStage = project.stage;
+    
+    const stageActions = {
+      "Notification": ["SUBMIT_STATUTORY_REVIEW", "COMPLETE_NOTIFICATION_REVIEW", "ADVANCE_TO_DECLARATION"],
+      "Declaration": ["VERIFY_OBJECTIONS", "SUBMIT_DECLARATION", "ADVANCE_TO_AWARD"],
+      "Award": ["FINALIZE_AWARD", "RECORD_COMPENSATION_ASSESSMENT", "ADVANCE_TO_COMPENSATION"],
+      "Compensation": ["INITIATE_DISBURSEMENT", "CONFIRM_COMPENSATION", "ADVANCE_TO_POSSESSION"],
+      "Possession": ["RECORD_POSSESSION", "UPLOAD_POSSESSION_EVIDENCE", "ADVANCE_TO_RNR"],
+      "R&R": ["UPDATE_ENTITLEMENT", "COMPLETE_RNR", "CLOSE_ACQUISITION_STAGE"]
+    };
+    
+    const allowedActions = stageActions[currentStage] || [];
+    
+    if (!allowedActions.includes(actionId)) {
+       // Log failed attempt
+       const auditEvent = {
+          id: "AUD-" + Date.now(),
+          projectId,
+          action: "WORKFLOW_ACTION_REJECTED",
+          stage: currentStage,
+          remarks: `Attempted invalid action: ${actionId}`,
+          executedBy: user.username,
+          timestamp: new Date().toISOString()
+       };
+       return res.status(400).json({ error: "ERR_INVALID_WORKFLOW_ACTION", auditEvent });
+    }
+    
+    let newStage = currentStage;
+    
+    if (actionId.startsWith("ADVANCE_TO_")) {
+       const stagesList = ["Notification", "Declaration", "Award", "Compensation", "Possession", "R&R"];
+       const cIdx = stagesList.indexOf(currentStage);
+       if (cIdx >= 0 && cIdx < stagesList.length - 1) {
+          newStage = stagesList[cIdx + 1];
+       } else {
+          project.status = "Completed";
+       }
+    } else if (actionId === "CLOSE_ACQUISITION_STAGE") {
+       project.status = "Completed";
+    }
+    
+    project.stage = newStage;
+    
+    const auditEvent = {
+       id: "AUD-" + Date.now(),
+       projectId,
+       action: actionId,
+       stage: currentStage,
+       newStage: newStage,
+       remarks,
+       documentId,
+       executedBy: user.username,
+       timestamp: new Date().toISOString()
+    };
+    
+    res.json({ success: true, message: "Workflow executed successfully", project, auditEvent });
+  });
+
+  
+  // --- GIS Additional APIs ---
+  app.patch("/api/parcels/:id", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+    const idx = (db as any).parcels.findIndex(p => p.parcelId === req.params.id || p.ulpin === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: "Parcel not found" });
+    const p = (db as any).parcels[idx];
+    
+    // Auth check based on project jurisdiction
+    const proj = (db as any).projects.find(pr => pr.id === p.projectId);
+    if (proj) {
+       if (user.role === "State Nodal Officer" && user.state !== proj.state) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "District LAO" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "Project Implementing Agency") {
+         const uObj = demoUsers.find(u => u.id === user.id);
+         if (!uObj.assignedProjects.includes(proj.id)) return res.status(403).json({ error: "Unauthorized project" });
+       }
+    }
+
+    if (req.body.geometry) {
+      // Expecting valid geojson geometry
+      p.geometry = req.body.geometry.coordinates[0];
+    }
+    if (req.body.area) p.area = req.body.area;
+    
+    res.json({ success: true, parcel: p });
+  });
+
+  app.delete("/api/parcels/:id", authenticateToken, (req, res) => {
+    const user = (req as any).user;
+    if (user.role === "Auditor" || user.role === "Affected Citizen") {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+    const idx = (db as any).parcels.findIndex(p => p.parcelId === req.params.id || p.ulpin === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: "Parcel not found" });
+    const p = (db as any).parcels[idx];
+    
+    const proj = (db as any).projects.find(pr => pr.id === p.projectId);
+    if (proj) {
+       if (user.role === "State Nodal Officer" && user.state !== proj.state) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "District LAO" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "Field Surveyor" && (user.state !== proj.state || user.district !== proj.district)) return res.status(403).json({ error: "Unauthorized jurisdiction" });
+       if (user.role === "Project Implementing Agency") {
+         const uObj = demoUsers.find(u => u.id === user.id);
+         if (!uObj.assignedProjects.includes(proj.id)) return res.status(403).json({ error: "Unauthorized project" });
+       }
+    }
+    (db as any).parcels.splice(idx, 1);
+    res.json({ success: true });
+  });
+  
+  
+  app.get("/api/gis/search", authenticateToken, (req, res) => {
+    const q = (req.query.q as string || "").toLowerCase();
+    if (!q) return res.json([]);
+    
+    const results: any[] = [];
+    
+    // Search Projects
+    (db as any).projects.forEach(p => {
+      if (p.projectName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || p.state.toLowerCase().includes(q) || p.district.toLowerCase().includes(q)) {
+        results.push({ type: 'project', id: p.id, title: p.projectName, subtitle: `${p.district}, ${p.state}` });
+      }
+    });
+    
+    // Search Parcels
+    (db as any).parcels.forEach(p => {
+      const props = (p as any).properties || {};
+      if (
+        (props.ulpin && props.ulpin.toLowerCase().includes(q)) ||
+        (props.parcelId && props.parcelId.toLowerCase().includes(q)) ||
+        (props.surveyNumber && props.surveyNumber.toLowerCase().includes(q)) ||
+        (props.village && props.village.toLowerCase().includes(q)) ||
+        (props.district && props.district.toLowerCase().includes(q))
+      ) {
+        results.push({ 
+           type: 'parcel', 
+           id: props.parcelId || props.ulpin, 
+           title: props.ulpin || props.parcelId, 
+           subtitle: `${props.village || ''} ${props.surveyNumber ? 'Survey: '+props.surveyNumber : ''}`,
+           feature: p
+        });
+      }
+    });
+    
+    res.json(results.slice(0, 20));
+  });
+
+  app.get("/api/gis/layers", authenticateToken, (req, res) => {
+    const projectId = req.query.projectId;
+    // Generate deterministic demo data based on projectId
+    const proj = (db as any).projects.find(p => p.id === projectId);
+    if(!proj) return res.status(404).json({error: "Project not found"});
+    
+    const projGeom = typeof (proj as any).footprint === 'string' ? JSON.parse((proj as any).footprint) : (proj as any).footprint;
+    // Basic fallback if project has no footprint
+    const baseCoords = projGeom && projGeom.coordinates ? projGeom.coordinates[0][0] : [77.018, 28.125];
+    
+    // Create plausible offsets based on the base coordinate
+    const c0 = baseCoords[0];
+    const c1 = baseCoords[1];
+
+    const layers = {
+      projectCorridors: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { name: proj.projectName, type: "corridor", projectId: proj.id },
+          geometry: projGeom || { type: "Polygon", coordinates: [[[c0-0.01, c1-0.01], [c0+0.01, c1-0.01], [c0+0.01, c1+0.01], [c0-0.01, c1+0.01], [c0-0.01, c1-0.01]]] }
+        }]
+      },
+      ecoSensitiveZones: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { zoneId: "ECO-100", zoneName: "Demo Eco Zone", category: "Protected", restriction: "No Construction", source: "Demo", projectId: proj.id },
+          geometry: { type: "Polygon", coordinates: [[[c0+0.015, c1+0.015], [c0+0.025, c1+0.015], [c0+0.025, c1+0.025], [c0+0.015, c1+0.025], [c0+0.015, c1+0.015]]] }
+        }]
+      },
+      villageBoundaries: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { villageId: "VIL-200", villageName: "Demo Village", district: proj.district, state: proj.state, projectId: proj.id, projectCount: 1, parcelCount: 12 },
+          geometry: { type: "Polygon", coordinates: [[[c0-0.02, c1-0.02], [c0+0.02, c1-0.02], [c0+0.02, c1+0.02], [c0-0.02, c1+0.02], [c0-0.02, c1-0.02]]] }
+        }]
+      },
+      section11Notification: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { notificationId: "SEC11-300", date: "2024-01-15", stage: "Section 11", projectId: proj.id },
+          geometry: { type: "Polygon", coordinates: [[[c0-0.005, c1-0.005], [c0+0.005, c1-0.005], [c0+0.005, c1+0.005], [c0-0.005, c1+0.005], [c0-0.005, c1-0.005]]] }
+        }]
+      },
+      awardPossession: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { awardStatus: "Completed", possessionStatus: "Pending", date: "2024-05-20", projectId: proj.id },
+          geometry: { type: "Polygon", coordinates: [[[c0-0.002, c1-0.002], [c0+0.002, c1-0.002], [c0+0.002, c1+0.002], [c0-0.002, c1+0.002], [c0-0.002, c1-0.002]]] }
+        }]
+      },
+      proposedAlignment: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { name: "Proposed Alignment", type: "alignment", projectId: proj.id },
+          geometry: { type: "LineString", coordinates: [[c0-0.01, c1], [c0, c1], [c0+0.01, c1]] }
+        }]
+      }
+    };
+    res.json(layers);
+  });
+
+  app.get("/api/parcels", authenticateToken, (req, res) => {
+    const projs = filterProjects(req.query, (req as any).user).map(p => p.id);
+    let filteredFeatures = (db as any).parcels.filter(f => projs.includes(f.projectId));
+    if ((req as any).user && (req as any).user.role === 'Affected Citizen') {
+        filteredFeatures = (db as any).parcels; // Do not filter by project for citizens, let ULPIN filter take over
+    }
+    
+    const user = (req as any).user;
+    if (user) {
+      const uObj = demoUsers.find(u => u.id === user.id);
+      if (user.role === 'Affected Citizen') {
+        if (uObj && uObj.ulpin) {
+          filteredFeatures = filteredFeatures.filter(f => f.ulpin === uObj.ulpin);
+        } else {
+          filteredFeatures = [];
+        }
+      } else if (user.role === 'Field Surveyor') {
+        const allowedParcels = getUserAssignedParcelIds(uObj);
+        filteredFeatures = filteredFeatures.filter(f => allowedParcels.includes(f.parcelId));
+      }
+    }
+    
+    const geojsonFeatures = filteredFeatures.map(f => ({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: f.geometry },
+      properties: {
+        parcelId: f.parcelId, projectId: f.projectId, ulpin: f.ulpin, stage: f.stage,
+        state: f.state, district: f.district, village: f.village, area: f.area,
+        surveyNumber: f.surveyNumber, landType: f.landType, owner: f.owner, risk: f.risk
+      }
+    }));
+    
+    res.json({ type: "FeatureCollection", features: geojsonFeatures });
+  });
+
+// Vite middleware for development
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -395,6 +2213,9 @@ async function startServer() {
     });
   });
 
+  const defaultHash = await argon2.hash('admin123');
+  demoUsers.forEach(u => u.passwordHash = defaultHash);
+  
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
   });

@@ -1,3 +1,4 @@
+import { apiFetch } from "../api";
 import { useState, useEffect } from "react";
 import { FileBarChart, Download, Calendar, Filter } from "lucide-react";
 import { ReportRecord } from "../types";
@@ -7,7 +8,7 @@ export function Reports({ selectedState = "All States", selectedDistrict = "All 
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`/api/reports?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
+    apiFetch(`/api/reports?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then(res => res.json())
       .then(data => {
         setReports(data);

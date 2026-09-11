@@ -1,9 +1,10 @@
+import { apiFetch } from "./api";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Sidebar, TopNav } from "./components/Layout";
 import { KPILedger, WorkflowTracker, PredictiveRisk } from "./components/Dashboard";
 import { GISMap } from "./components/Map";
@@ -17,6 +18,7 @@ import { Awards } from "./components/Awards";
 import { Reports } from "./components/Reports";
 import { Grievances } from "./components/Grievance";
 import { FilterBar } from "./components/Dashboard";
+import { DashboardAnalytics } from "./components/DashboardAnalytics";
 import { useTranslation } from "./i18n";
 import { Login } from "./components/Login";
 import { Settings, User, X, Check } from "lucide-react";
@@ -41,7 +43,7 @@ function Modal({ title, icon: Icon, onClose, children }: any) {
 }
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem("bhoomi_token"));
   const [activeTab, setActiveTab] = useState("dashboard");
   const [selectedState, setSelectedState] = useState("All States");
   const [selectedDistrict, setSelectedDistrict] = useState("All Districts");
@@ -50,26 +52,78 @@ export default function App() {
   const [selectedStage, setSelectedStage] = useState("All Stages");
   const [selectedCategory, setSelectedCategory] = useState("All Categories");
   const [selectedRisk, setSelectedRisk] = useState("All Risks");
+  
   const [autoSync, setAutoSync] = useState(true);
   const [syncStatus, setSyncStatus] = useState("Live");
-  const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
+  const [lastSync, setLastSync] = useState(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}));
+  const [showSyncPanel, setShowSyncPanel] = useState(false);
+  const reconnectAttempts = useRef(0);
+
 
   useEffect(() => {
-    if (!autoSync) {
-      setSyncStatus("Offline");
-      return;
-    }
-    const interval = setInterval(() => {
-      setSyncStatus("Syncing...");
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setIsAuthenticated(false);
+      localStorage.removeItem("bhoomi_token");
+      localStorage.removeItem("bhoomi_refresh");
+    };
+    window.addEventListener('bhoomi_unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('bhoomi_unauthorized', handleUnauthorized);
+  }, []);
+
+  useEffect(() => {
+    let pingInterval: any;
+    
+    const connectToMockWebSocket = () => {
+      setSyncStatus("Connecting");
+      
       setTimeout(() => {
         setSyncStatus("Live");
-        setLastSync(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}));
-      }, 800);
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [autoSync]);
+        setLastSync(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}));
+        reconnectAttempts.current = 0;
+        
+        // Setup heartbeat
+        pingInterval = setInterval(() => {
+          // Simulate a random disconnect 2% of the time to demonstrate reconnect logic
+          if (Math.random() < 0.02) {
+            setSyncStatus("Offline");
+            clearInterval(pingInterval);
+            handleReconnect();
+          } else {
+            setLastSync(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}));
+          }
+        }, 10000);
+      }, 1000);
+    };
+
+    const handleReconnect = () => {
+      setSyncStatus("Reconnecting");
+      const backoff = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 30000);
+      reconnectAttempts.current += 1;
+      
+      setTimeout(() => {
+        connectToMockWebSocket();
+      }, backoff);
+    };
+
+    connectToMockWebSocket();
+
+    return () => {
+      if (pingInterval) clearInterval(pingInterval);
+    };
+  }, []);
+
   const [activeModal, setActiveModal] = useState<string | null>(null);
-  const [profile, setProfile] = useState({ name: "Ramesh Kumar", email: "ramesh.k@bhoomisetu.gov.in", role: "District LAO", district: "New Delhi" });
+  const [profile, setProfile] = useState<any>(null);
+  const [isHydrating, setIsHydrating] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editProfileForm, setEditProfileForm] = useState({ name: "", email: "" });
   const [passwordForm, setPasswordForm] = useState({ current: "", newPass: "", confirm: "" });
@@ -77,20 +131,48 @@ export default function App() {
   const [notifPrefs, setNotifPrefs] = useState({ email: true, sms: true });
   const { t } = useTranslation();
   useEffect(() => {
-    if (isAuthenticated) {
-      fetch('/api/profile').then(r => r.json()).then(data => {
-        setProfile(data);
-        setNotifPrefs({ email: data.notifEmail, sms: data.notifSms });
+    const token = localStorage.getItem("bhoomi_token");
+    const refresh = localStorage.getItem("bhoomi_refresh");
+    if (isAuthenticated && token) {
+      // Decode user from token or refresh
+      apiFetch('/api/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: refresh })
+      }).then(r => {
+        if(r.ok) return r.json();
+        throw new Error('session expired');
+      }).then(data => {
+        localStorage.setItem("bhoomi_token", data.token);
+        setProfile(data.user);
+        setSelectedState(data.user.state === "All" ? "All States" : (data.user.state || "All States"));
+        setSelectedDistrict(data.user.district === "All" ? "All Districts" : (data.user.district || "All Districts"));
+        setIsHydrating(false);
+      }).catch(() => {
+        setIsAuthenticated(false); 
+        localStorage.removeItem("bhoomi_token"); 
+        localStorage.removeItem("bhoomi_refresh");
+        setIsHydrating(false);
       });
+    } else {
+      setIsHydrating(false);
     }
   }, [isAuthenticated]);
 
-  if (!isAuthenticated) {
-    return <Login onLogin={() => setIsAuthenticated(true)} />;
+  if (isHydrating) {
+    return <div className="min-h-screen flex items-center justify-center bg-survey-paper"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-alluvium-red"></div></div>;
+  }
+  if (!isAuthenticated || !profile) {
+    return <Login onLogin={(user) => { 
+      setIsAuthenticated(true); 
+      setProfile(user);
+      setSelectedState(user.state === "All" ? "All States" : (user.state || "All States"));
+      setSelectedDistrict(user.district === "All" ? "All Districts" : (user.district || "All Districts"));
+    }} />;
   }
 
   return (
-    <div className="min-h-screen bg-survey-paper text-registry-ink flex flex-col font-sans">
+    <div className="h-screen bg-survey-paper text-registry-ink flex flex-col font-sans overflow-hidden">
       <TopNav 
         setActiveTab={setActiveTab} 
         setIsAuthenticated={setIsAuthenticated}
@@ -100,24 +182,56 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
         <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} profile={profile} />
         
-        <main className={`flex-1 flex flex-col min-w-0 ${activeTab === "dashboard" ? "overflow-hidden" : "overflow-y-auto"}`}>
+        <main className={`flex-1 flex flex-col min-w-0 ${activeTab === "map" ? "overflow-hidden relative" : "overflow-y-auto"}`}>
           {activeTab === "dashboard" && (
             <>
-              <FilterBar selectedState={selectedState} setSelectedState={setSelectedState} selectedDistrict={selectedDistrict} setSelectedDistrict={setSelectedDistrict} selectedProject={selectedProject} setSelectedProject={setSelectedProject} searchQuery={searchQuery} setSearchQuery={setSearchQuery} selectedStage={selectedStage} setSelectedStage={setSelectedStage} selectedCategory={selectedCategory} setSelectedCategory={setSelectedCategory} selectedRisk={selectedRisk} setSelectedRisk={setSelectedRisk} />
-              <KPILedger selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
-              <div className="flex-1 p-6 flex flex-col xl:flex-row gap-6 min-h-0">
+              <FilterBar profile={profile} selectedState={selectedState} setSelectedState={setSelectedState} selectedDistrict={selectedDistrict} setSelectedDistrict={setSelectedDistrict} selectedProject={selectedProject} setSelectedProject={setSelectedProject} searchQuery={searchQuery} setSearchQuery={setSearchQuery} selectedStage={selectedStage} setSelectedStage={setSelectedStage} selectedCategory={selectedCategory} setSelectedCategory={setSelectedCategory} selectedRisk={selectedRisk} setSelectedRisk={setSelectedRisk} />
+              <KPILedger selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} onNavigate={setActiveTab} />
+              <div className="flex-none min-h-[600px] p-6 flex flex-col xl:flex-row gap-6">
                 <div className="flex-[2] min-h-[400px] xl:min-h-0 flex flex-col shadow-sm relative">
                   <div className="p-4 bg-white border-x border-t border-graticule-teal/30 font-serif font-semibold text-registry-ink flex justify-between items-center">
                     <h2>{t("dashboard.mapTitle")}</h2>
-                    <button 
-                      onClick={() => setAutoSync(!autoSync)} 
-                      className={`text-xs font-sans font-medium px-3 py-1.5 rounded-sm transition-colors cursor-pointer ${autoSync ? 'bg-graticule-teal/10 text-graticule-teal border border-graticule-teal/30 hover:bg-graticule-teal/20' : 'bg-registry-ink/10 text-registry-ink/60 border border-registry-ink/20 hover:bg-registry-ink/20'}`}
-                    >
-                      {syncStatus === "Live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-cultivated-green mr-1.5 mb-0.5 animate-pulse"></span>}
-   {syncStatus === "Offline" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-registry-ink/40 mr-1.5 mb-0.5"></span>}
-   {syncStatus === "Syncing..." && <span className="inline-block w-1.5 h-1.5 rounded-full bg-graticule-teal mr-1.5 mb-0.5 animate-ping"></span>}
-   {syncStatus} <span className="text-[10px] font-normal opacity-70 ml-1">({lastSync})</span>
-                    </button>
+                    
+                    <div className="relative">
+                      <button 
+                        onClick={() => setShowSyncPanel(!showSyncPanel)} 
+                        className={`text-xs font-sans font-medium px-3 py-1.5 rounded-sm transition-colors cursor-pointer ${syncStatus === 'Live' ? 'bg-graticule-teal/10 text-graticule-teal border border-graticule-teal/30 hover:bg-graticule-teal/20' : syncStatus === 'Offline' ? 'bg-alluvium-red/10 text-alluvium-red border border-alluvium-red/30' : 'bg-registry-ink/10 text-registry-ink border border-registry-ink/20'}`}
+                      >
+                        {syncStatus === "Live" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-cultivated-green mr-1.5 mb-0.5 animate-pulse"></span>}
+                        {syncStatus === "Offline" && <span className="inline-block w-1.5 h-1.5 rounded-full bg-alluvium-red mr-1.5 mb-0.5"></span>}
+                        {(syncStatus === "Syncing..." || syncStatus === "Connecting" || syncStatus === "Reconnecting") && <span className="inline-block w-1.5 h-1.5 rounded-full bg-graticule-teal mr-1.5 mb-0.5 animate-ping"></span>}
+                        {syncStatus}
+                      </button>
+
+                      {showSyncPanel && (
+                        <div className="absolute top-full right-0 mt-2 w-64 bg-white border border-graticule-teal/30 shadow-xl rounded-sm z-[100] p-4 text-xs font-sans font-normal">
+                          <h4 className="font-semibold text-registry-ink mb-3 border-b border-graticule-teal/10 pb-2">{t("sync.connectionStatus", "Connection Status")}</h4>
+                          <div className="space-y-2 text-registry-ink/80">
+                            <div className="flex justify-between">
+                              <span>{t("sync.status", "Status:")}</span>
+                              <span className={`font-medium ${syncStatus === 'Live' ? 'text-cultivated-green' : 'text-alluvium-red'}`}>{syncStatus}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>{t("sync.lastSync", "Last Sync:")}</span>
+                              <span>{lastSync}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span>{t("sync.autoUpdate", "Auto-update:")}</span>
+                              <span className="text-graticule-teal">{t("sync.enabled", "Enabled")}</span>
+                            </div>
+                          </div>
+                          {syncStatus === 'Offline' && (
+                            <button 
+                              onClick={() => setSyncStatus("Connecting")}
+                              className="mt-4 w-full bg-tilled-earth text-white py-1.5 rounded-sm hover:bg-tilled-earth/90 transition-colors cursor-pointer"
+                            >
+                              {t("sync.reconnect", "Reconnect Now")}
+</button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                   </div>
                   <div className="flex-1 min-h-0 relative">
                     <div className="absolute inset-0">
@@ -133,18 +247,29 @@ export default function App() {
                   <PredictiveRisk selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />
                 </div>
               </div>
+              <div className="flex-none pb-6">
+                <DashboardAnalytics 
+                  selectedState={selectedState} 
+                  selectedDistrict={selectedDistrict} 
+                  selectedProject={selectedProject} 
+                  selectedStage={selectedStage} 
+                  selectedCategory={selectedCategory} 
+                  selectedRisk={selectedRisk} 
+                />
+              </div>
+
             </>
           )}
 
-          {activeTab === "proposals" && <Proposals selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "compensation" && <Compensation selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "rnr" && <RnR selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "documents" && <Documents selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "alerts" && <AlertsPanel setActiveTab={setActiveTab} selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "map" && <MapView selectedState={selectedState} selectedDistrict={selectedDistrict} searchQuery={searchQuery} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} />}
-          {activeTab === "awards" && <Awards selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "reports" && <Reports selectedState={selectedState} selectedDistrict={selectedDistrict} />}
-          {activeTab === "grievance" && <Grievances selectedState={selectedState} selectedDistrict={selectedDistrict} />}
+          {activeTab === "proposals" && <div className="h-full overflow-y-auto p-4"><Proposals profile={profile} setActiveTab={setActiveTab} setSelectedProject={setSelectedProject} selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} /></div>}
+          {activeTab === "compensation" && <div className="h-full overflow-y-auto p-4"><Compensation selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} /></div>}
+          {activeTab === "rnr" && <div className="h-full overflow-y-auto p-4"><RnR selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} /></div>}
+          {activeTab === "documents" && <div className="h-full overflow-y-auto p-4"><Documents selectedState={selectedState} selectedDistrict={selectedDistrict} selectedProject={selectedProject} selectedStage={selectedStage} selectedCategory={selectedCategory} selectedRisk={selectedRisk} profile={profile} setActiveTab={setActiveTab} setSelectedProject={setSelectedProject}  /></div>}
+          {activeTab === "alerts" && <div className="h-full overflow-y-auto p-4"><AlertsPanel setActiveTab={setActiveTab} selectedState={selectedState} selectedDistrict={selectedDistrict} /></div>}
+          {activeTab === "map" && <div className="h-full w-full absolute inset-0"><MapView setActiveTab={setActiveTab} profile={profile} selectedState={selectedState} setSelectedState={setSelectedState} selectedDistrict={selectedDistrict} setSelectedDistrict={setSelectedDistrict} searchQuery={searchQuery} setSearchQuery={setSearchQuery} selectedProject={selectedProject} setSelectedProject={setSelectedProject} selectedStage={selectedStage} setSelectedStage={setSelectedStage} selectedCategory={selectedCategory} setSelectedCategory={setSelectedCategory} selectedRisk={selectedRisk} setSelectedRisk={setSelectedRisk} /></div>}
+          {activeTab === "awards" && <div className="h-full overflow-y-auto p-4"><Awards selectedState={selectedState} selectedDistrict={selectedDistrict} setActiveTab={setActiveTab} setSelectedProject={setSelectedProject} profile={profile} /></div>}
+          {activeTab === "reports" && <div className="h-full overflow-y-auto p-4"><Reports selectedState={selectedState} selectedDistrict={selectedDistrict} /></div>}
+          {activeTab === "grievance" && <div className="h-full overflow-y-auto p-4"><Grievances selectedState={selectedState} selectedDistrict={selectedDistrict} /></div>}
 
           {activeTab !== "dashboard" && activeTab !== "proposals" && activeTab !== "compensation" && activeTab !== "rnr" && activeTab !== "documents" && activeTab !== "alerts" && activeTab !== "map" && activeTab !== "awards" && activeTab !== "reports" && activeTab !== "grievance" && (
             <div className="p-8 flex items-center justify-center h-full text-registry-ink/60">
@@ -211,7 +336,7 @@ export default function App() {
                     Cancel
                   </button>
                   <button onClick={() => {
-                    fetch('/api/profile', {
+                    apiFetch('/api/profile', {
                       method: 'POST', headers: {'Content-Type': 'application/json'},
                       body: JSON.stringify({ name: editProfileForm.name, email: editProfileForm.email })
                     }).then(r => r.json()).then(data => {
@@ -238,14 +363,14 @@ export default function App() {
                 <span className="text-sm">Email Notifications</span>
                 <input type="checkbox" checked={notifPrefs.email} onChange={e => {
                   setNotifPrefs({...notifPrefs, email: e.target.checked});
-                  fetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifEmail: e.target.checked }) });
+                  apiFetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifEmail: e.target.checked }) });
                 }} className="accent-tilled-earth w-4 h-4" />
               </label>
               <label className="flex items-center justify-between p-3 border border-graticule-teal/30 rounded-sm cursor-pointer hover:bg-graticule-teal/5 transition-colors mt-2">
                 <span className="text-sm">SMS Alerts</span>
                 <input type="checkbox" checked={notifPrefs.sms} onChange={e => {
                   setNotifPrefs({...notifPrefs, sms: e.target.checked});
-                  fetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifSms: e.target.checked }) });
+                  apiFetch('/api/profile', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ notifSms: e.target.checked }) });
                 }} className="accent-tilled-earth w-4 h-4" />
               </label>
             </div>
@@ -256,15 +381,15 @@ export default function App() {
               {passwordState.success && <div className="text-cultivated-green text-xs mb-2">Password changed successfully. Please log in again.</div>}
               
               <div className="space-y-3">
-                <input type="password" placeholder="Current Password" value={passwordForm.current} onChange={e => setPasswordForm({...passwordForm, current: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
-                <input type="password" placeholder="New Password" value={passwordForm.newPass} onChange={e => setPasswordForm({...passwordForm, newPass: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
-                <input type="password" placeholder="Confirm New Password" value={passwordForm.confirm} onChange={e => setPasswordForm({...passwordForm, confirm: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <input type="password" placeholder={t("profile.currentPassword", "Current Password")} value={passwordForm.current} onChange={e => setPasswordForm({...passwordForm, current: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <input type="password" placeholder={t("profile.newPassword", "New Password")} value={passwordForm.newPass} onChange={e => setPasswordForm({...passwordForm, newPass: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
+                <input type="password" placeholder={t("profile.confirmPassword", "Confirm New Password")} value={passwordForm.confirm} onChange={e => setPasswordForm({...passwordForm, confirm: e.target.value})} className="w-full px-3 py-2 border border-graticule-teal/30 rounded-sm text-sm focus:outline-none focus:border-graticule-teal" />
                 <button onClick={() => {
                   if (passwordForm.newPass !== passwordForm.confirm) {
                     setPasswordState({error: "Passwords do not match", success: false});
                     return;
                   }
-                  fetch('/api/password', {
+                  apiFetch('/api/password', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ current: passwordForm.current, newPass: passwordForm.newPass })
                   }).then(r => r.json()).then(data => {
@@ -272,11 +397,11 @@ export default function App() {
                     else {
                       setPasswordState({error: "", success: true});
                       setPasswordForm({current: "", newPass: "", confirm: ""});
-                      setTimeout(() => setIsAuthenticated(false), 2000); // Logout after change
+                      setTimeout(() => { setIsAuthenticated(false); localStorage.removeItem("bhoomi_token"); localStorage.removeItem("bhoomi_refresh"); }, 2000); // Logout after change
                     }
                   }).catch(e => setPasswordState({error: "Server error", success: false}));
                 }} className="w-full px-4 py-2 bg-registry-ink text-white rounded-sm text-sm font-medium hover:bg-registry-ink/90 transition-colors mt-2">
-                  Update Password
+                  {t("profile.updatePassword", "Update Password")}
                 </button>
               </div>
             </div>

@@ -1,3 +1,4 @@
+import { apiFetch } from "../api";
 import { useState, useEffect } from "react";
 import { ShieldAlert, Search, Filter, MessageSquare, AlertCircle } from "lucide-react";
 import { GrievanceRecord } from "../types";
@@ -7,7 +8,7 @@ export function Grievances({ selectedState = "All States", selectedDistrict = "A
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`/api/grievances?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
+    apiFetch(`/api/grievances?state=${encodeURIComponent(selectedState)}&district=${encodeURIComponent(selectedDistrict)}`)
       .then(res => res.json())
       .then(data => {
         setGrievances(data);
